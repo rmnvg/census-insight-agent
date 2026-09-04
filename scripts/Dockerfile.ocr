@@ -1,0 +1,17 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_COMPILE_BYTECODE=1
+
+# Debian Bookworm's pinned Tesseract package supplies the local OCR engine and
+# English language data. This image is used only by the offline review utility.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends tesseract-ocr=5.3.0-2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv pip install --system pillow==12.3.0
+COPY scripts/ocr_page_review.py ./scripts/ocr_page_review.py
+
+CMD ["python", "scripts/ocr_page_review.py"]

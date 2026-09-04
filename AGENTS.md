@@ -19,7 +19,11 @@ These instructions apply to the entire repository.
 - Original PDFs are the authoritative source documents.
 - When supplied, Markdown is the preferred extracted representation of a PDF.
 - Use PyMuPDF4LLM only when Markdown pages are missing or when processing newly supplied PDFs.
+- Keep unverified OCR quarantined under `data/processed/page-review/`; it is never evidence and
+  must not enter chunking, embeddings, Qdrant, retrieval, or answer generation.
+- Excluded visual pages indicate an indexing limitation, not that information is absent from the
+  authoritative PDF.
 
 ## Current scope
 
-The initial repository contains health endpoints and infrastructure only. Do not implement ingestion, retrieval, or LangGraph workflows until that work is explicitly requested.
+The repository contains Vertex AI providers plus citation-safe ingestion and Qdrant hybrid retrieval. Full LangGraph orchestration and final-answer generation remain deferred until explicitly requested.

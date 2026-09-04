@@ -1,0 +1,107 @@
+[
+  {
+    "case_id": "ka-sex-ratio",
+    "category": "numeric",
+    "query": "What was Karnataka's sex ratio in 2011?",
+    "expected_targets": [{"document_id": "census-2011-karnataka-pca-highlights", "page_number": 8, "source_snippet": "The Sex Ratio in Karnataka has increased from 965 in 2001 to 973 in 2011.", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "ka-literacy-definition",
+    "category": "definition",
+    "query": "How is effective literacy rate defined?",
+    "expected_targets": [{"document_id": "census-2011-karnataka-pca-highlights", "page_number": 10, "source_snippet": "The effective Literacy rate has been defined as the percentage of total number of literates among the population aged 7 years and above.", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "ka-worker-definition",
+    "category": "definition",
+    "query": "What is the Work Participation Rate?",
+    "expected_targets": [{"document_id": "census-2011-karnataka-pca-highlights", "page_number": 10, "source_snippet": "The Work Participation Rate is defined as the proportion of total workers (ie., main and marginal workers) to total population.", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "ka-filtered-population",
+    "category": "filtered",
+    "query": "Which district was Karnataka's most populated district?",
+    "regions": ["Karnataka"],
+    "expected_targets": [{"document_id": "census-2011-karnataka-pca-highlights", "page_number": 7, "source_snippet": "Bangalore District is the most populated District with 96,21,551 persons", "verification_note": "Verified in the supplied Karnataka Markdown page-7 block and matching authoritative PDF page."}]
+  },
+  {
+    "case_id": "od-total-population",
+    "category": "numeric",
+    "query": "What was Odisha's total population in Census 2011?",
+    "expected_targets": [{"document_id": "census-2011-odisha-pca-highlights", "page_number": 8, "source_snippet": "the total population of Odisha at 0.00 hours of 1st March 2011 is 4,19,74,218", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "od-rural-largest",
+    "category": "numeric",
+    "query": "Which Odisha district had the largest rural population and what was it?",
+    "expected_targets": [{"document_id": "census-2011-odisha-pca-highlights", "page_number": 8, "source_snippet": "Ganjam district has the largest rural population of 27,61,030", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "od-literacy",
+    "category": "numeric",
+    "query": "What was Odisha's effective literacy rate?",
+    "regions": ["Odisha"],
+    "expected_targets": [{"document_id": "census-2011-odisha-pca-highlights", "page_number": 10, "source_snippet": "The Effective Literacy Rate in Odisha works out to 72.9 percent", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "od-filter-document",
+    "category": "filtered",
+    "query": "What were Odisha's rural and urban population totals?",
+    "document_ids": ["census-2011-odisha-pca-highlights"],
+    "expected_targets": [{"document_id": "census-2011-odisha-pca-highlights", "page_number": 8, "source_snippet": "the rural population is 3,49,70,562 and the urban population is 70,03,656", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "mp-urban-share",
+    "category": "numeric",
+    "query": "What urban population share did Indore have in Madhya Pradesh?",
+    "expected_targets": [{"document_id": "census-2011-madhya-pradesh-pca-highlights", "page_number": 8, "source_snippet": "Indore has the highest share of urban population at 2.4 million (12.1%)", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "mp-rural-urban-proportion",
+    "category": "numeric",
+    "query": "What proportions of Madhya Pradesh population were rural and urban?",
+    "regions": ["Madhya Pradesh"],
+    "expected_targets": [{"document_id": "census-2011-madhya-pradesh-pca-highlights", "page_number": 9, "source_snippet": "the rural population constitutes 72.4% and urban population 27.6%", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "mp-child-sex-ratio",
+    "category": "numeric",
+    "query": "How did Madhya Pradesh child sex ratio change from 2001 to 2011?",
+    "expected_targets": [{"document_id": "census-2011-madhya-pradesh-pca-highlights", "page_number": 10, "source_snippet": "from 932 to 918 (-14 points) during 2001-2011", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "mp-density",
+    "category": "filtered",
+    "query": "Which Madhya Pradesh district was most densely populated?",
+    "document_ids": ["census-2011-madhya-pradesh-pca-highlights"],
+    "expected_targets": [{"document_id": "census-2011-madhya-pradesh-pca-highlights", "page_number": 8, "source_snippet": "Bhopal (855) turns out to be the most densely populated district", "verification_note": "Verified against the supplied Markdown page block and authoritative PDF page mapping."}]
+  },
+  {
+    "case_id": "cross-state-population",
+    "category": "cross_document",
+    "query": "Compare the 2011 total population figures described for Odisha and Madhya Pradesh.",
+    "expected_targets": [
+      {"document_id": "census-2011-odisha-pca-highlights", "page_number": 8, "source_snippet": "the total population of Odisha at 0.00 hours of 1st March 2011 is 4,19,74,218", "verification_note": "Verified against the Odisha source pair."},
+      {"document_id": "census-2011-madhya-pradesh-pca-highlights", "page_number": 8, "source_snippet": "In Madhya Pradesh total population as per Census 2011", "verification_note": "Verified against the Madhya Pradesh source pair."}
+    ]
+  },
+  {
+    "case_id": "ka-rural-urban-growth",
+    "category": "numeric",
+    "query": "How did Karnataka rural and urban population growth rates differ in 2001-2011?",
+    "expected_targets": [{"document_id": "census-2011-karnataka-pca-highlights", "page_number": 8, "source_snippet": "the Rural population grew at the rate of 7.40 per cent", "verification_note": "Verified in the supplied Karnataka narrative; the same passage reports 31.54 per cent urban growth."}]
+  },
+  {
+    "case_id": "od-decadal-table",
+    "category": "numeric",
+    "query": "In the Odisha decadal variation table, what value is listed for 1951-61?",
+    "expected_targets": [{"document_id": "census-2011-odisha-pca-highlights", "page_number": 14, "source_snippet": "| 1951-61     | 17.0               |", "verification_note": "Verified verbatim in the supplied Markdown table mapped to authoritative PDF page 14."}]
+  },
+  {
+    "case_id": "out-of-corpus",
+    "category": "unanswerable",
+    "query": "What was the Mars rover battery voltage in 2020?",
+    "expected_targets": [],
+    "answerable": false
+  }
+]

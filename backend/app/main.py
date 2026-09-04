@@ -3,6 +3,8 @@ from typing import Literal
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from backend.app.api import router
+
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
@@ -10,6 +12,7 @@ class HealthResponse(BaseModel):
 
 
 app = FastAPI(title="Census Insight Agent API", version="0.1.0")
+app.include_router(router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])

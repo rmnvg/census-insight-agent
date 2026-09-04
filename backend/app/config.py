@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +24,10 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "gemini-embedding-001"
     gemini_embedding_dimension: int = 768
     qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "census_documents"
+    data_root: Path = Path("data")
+    sparse_embedding_model: str = "Qdrant/bm25"
+    ingestion_version: str = "1"
 
     @model_validator(mode="after")
     def validate_vertex_configuration(self) -> "Settings":

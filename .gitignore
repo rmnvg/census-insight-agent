@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 htmlcov/
 .coverage
+*.ses
 
 # Environment and credentials
 .env
@@ -29,6 +30,13 @@ data/normalized/*
 !data/normalized/.gitkeep
 workspace/*
 !workspace/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/manifests/generated/
+data/source/pdf/*
+!data/source/pdf/.gitkeep
+data/source/markdown/*
+!data/source/markdown/.gitkeep
 
 # Editors and operating systems
 .DS_Store

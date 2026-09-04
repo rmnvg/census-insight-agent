@@ -1,0 +1,46 @@
+[
+  {
+    "case_id": "exact_numeric_lookup",
+    "query": "What is the total population?",
+    "expected_phrase": "total population of 150 residents",
+    "expected_page": 1,
+    "top_k": 5
+  },
+  {
+    "case_id": "paraphrased_semantic_query",
+    "query": "How literate are women in this region?",
+    "expected_phrase": "literacy rate of 82 percent",
+    "expected_page": 2,
+    "top_k": 5
+  },
+  {
+    "case_id": "lexical_district_name",
+    "query": "Mysuru",
+    "expected_phrase": "Mysuru | 95",
+    "expected_page": 1,
+    "top_k": 5
+  },
+  {
+    "case_id": "table_lookup",
+    "query": "What is Kodagu's population?",
+    "expected_phrase": "Kodagu | 55",
+    "expected_page": 1,
+    "top_k": 5
+  },
+  {
+    "case_id": "filtered_document_query",
+    "query": "men's literacy rate",
+    "expected_phrase": "88 percent",
+    "expected_page": 2,
+    "document_ids": ["synthetic-karnataka"],
+    "regions": ["Karnataka"],
+    "top_k": 5
+  },
+  {
+    "case_id": "unanswerable_query",
+    "query": "What was the coastal rainfall in 2019?",
+    "expected_phrase": null,
+    "expected_page": null,
+    "top_k": 5
+  }
+]

@@ -16,6 +16,12 @@ Original PDFs remain authoritative. Provided Markdown is the preferred extracted
 
 The executor is an isolated service. It must never receive Google Cloud credentials, credential volumes, or Google authentication environment variables. Any future executor protocol must pass only the minimum task data required.
 
+## Ingestion and retrieval
+
+PDF identity and page numbering remain authoritative. Supplied Markdown is preferred only after explicit-marker parsing or confident deterministic page alignment. Missing pages use PyMuPDF4LLM. Chunks never cross page boundaries and citation snippets remain verbatim.
+
+Retrieval combines 768-dimensional Gemini dense vectors and local FastEmbed BM25 sparse vectors in one Qdrant collection. Qdrant performs reciprocal-rank fusion, and every result must carry valid page provenance.
+
 ## Deferred work
 
-Ingestion, retrieval, and LangGraph orchestration are intentionally deferred from the initial scaffold.
+Full LangGraph orchestration and final-answer generation remain intentionally deferred.

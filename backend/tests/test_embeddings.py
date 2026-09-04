@@ -9,6 +9,7 @@ from backend.app.providers.errors import EmbeddingInputError, EmbeddingResponseE
 class FakeModels:
     def __init__(self, response: types.EmbedContentResponse) -> None:
         self.response = response
+        self.task_types: list[str | None] = []
 
     def embed_content(
         self,
@@ -17,12 +18,14 @@ class FakeModels:
         contents: str | list[str],
         config: types.EmbedContentConfig,
     ) -> types.EmbedContentResponse:
+        self.task_types.append(config.task_type)
         return self.response
 
 
 class FakeClient:
     def __init__(self, response: types.EmbedContentResponse) -> None:
-        self.models: EmbeddingModels = FakeModels(response)
+        self.fake_models = FakeModels(response)
+        self.models: EmbeddingModels = self.fake_models
 
 
 def make_settings() -> Settings:
@@ -65,3 +68,16 @@ def test_embedding_provider_rejects_missing_values() -> None:
 
     with pytest.raises(EmbeddingResponseError, match="has no values"):
         provider.embed_query("query")
+
+
+def test_document_and_query_use_distinct_retrieval_task_types() -> None:
+    response = types.EmbedContentResponse(
+        embeddings=[types.ContentEmbedding(values=[1.0, 2.0, 3.0])]
+    )
+    client = FakeClient(response)
+    provider = VertexEmbeddingProvider(make_settings(), client)
+
+    provider.embed_documents(["document"])
+    provider.embed_query("query")
+
+    assert client.fake_models.task_types == ["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]

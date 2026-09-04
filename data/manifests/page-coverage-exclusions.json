@@ -1,0 +1,164 @@
+[
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 1,
+    "coverage_status": "excluded_decorative",
+    "reason": "Reviewed publication cover; exclusion approved because it contains no substantive census evidence.",
+    "ocr_confidence": null,
+    "review_status": "approved_exclusion",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 13,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Administrative map labels and regions were not extracted with citation-safe spatial association.",
+    "ocr_confidence": 63.3,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 19,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Pie-chart labels and values were incompletely extracted despite high token confidence.",
+    "ocr_confidence": 94.18,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 21,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "District and percentage associations in the pie chart were incompletely extracted.",
+    "ocr_confidence": 94.66,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 24,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Chart categories and values were not completely preserved with reliable associations.",
+    "ocr_confidence": 82.49,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 28,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Rotated district labels and chart values produced unreliable OCR output.",
+    "ocr_confidence": 42.84,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 31,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Map district labels could not be safely associated with legend ranges.",
+    "ocr_confidence": 50.97,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 33,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Rotated district labels and child-population values produced unreliable OCR output.",
+    "ocr_confidence": 44.36,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 37,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Child-sex-ratio map labels could not be safely associated with legend ranges.",
+    "ocr_confidence": 54.22,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 43,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "District labels and Scheduled Caste chart values produced severely unreliable OCR output.",
+    "ocr_confidence": 35.59,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 48,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "District labels and Scheduled Tribe chart values produced severely unreliable OCR output.",
+    "ocr_confidence": 30.91,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 51,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Literacy map district labels could not be safely associated with legend ranges.",
+    "ocr_confidence": 49.14,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "page_number": 56,
+    "coverage_status": "excluded_unverified_visual",
+    "reason": "Worker chart values and category associations were incompletely extracted.",
+    "ocr_confidence": 85.84,
+    "review_status": "unverified",
+    "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+  },
+  {
+    "document_id": "census-2011-odisha-pca-highlights",
+    "page_number": 134,
+    "coverage_status": "excluded_blank",
+    "reason": "Visual inspection confirmed that the authoritative PDF page is blank.",
+    "ocr_confidence": null,
+    "review_status": "approved_exclusion",
+    "source_checksum": "e381bbd9ecc76b667e5d7882533d33a23f5e31740089603b26c3c33ef1e85081"
+  },
+  {
+    "document_id": "census-2011-madhya-pradesh-pca-highlights",
+    "page_number": 7,
+    "coverage_status": "excluded_blank",
+    "reason": "Visual inspection confirmed that the authoritative PDF page is blank.",
+    "ocr_confidence": null,
+    "review_status": "approved_exclusion",
+    "source_checksum": "e6ef5f798b5aa8548555163b486329a1cc6bad869a4dbe0b9d145a667b1a7573"
+  },
+  {
+    "document_id": "census-2011-madhya-pradesh-pca-highlights",
+    "page_number": 19,
+    "coverage_status": "excluded_blank",
+    "reason": "Visual inspection confirmed that the authoritative PDF page is blank.",
+    "ocr_confidence": null,
+    "review_status": "approved_exclusion",
+    "source_checksum": "e6ef5f798b5aa8548555163b486329a1cc6bad869a4dbe0b9d145a667b1a7573"
+  },
+  {
+    "document_id": "census-2011-madhya-pradesh-pca-highlights",
+    "page_number": 47,
+    "coverage_status": "excluded_blank",
+    "reason": "Visual inspection confirmed that the authoritative PDF page is blank.",
+    "ocr_confidence": null,
+    "review_status": "approved_exclusion",
+    "source_checksum": "e6ef5f798b5aa8548555163b486329a1cc6bad869a4dbe0b9d145a667b1a7573"
+  },
+  {
+    "document_id": "census-2011-madhya-pradesh-pca-highlights",
+    "page_number": 63,
+    "coverage_status": "excluded_blank",
+    "reason": "Visual inspection confirmed that the authoritative PDF page is blank.",
+    "ocr_confidence": null,
+    "review_status": "approved_exclusion",
+    "source_checksum": "e6ef5f798b5aa8548555163b486329a1cc6bad869a4dbe0b9d145a667b1a7573"
+  }
+]

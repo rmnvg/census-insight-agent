@@ -1,0 +1,23 @@
+[
+  {
+    "document_id": "census-2011-karnataka-pca-highlights",
+    "title": "Primary Census Abstract Data Highlights: Karnataka",
+    "region": "Karnataka",
+    "pdf_filename": "PC11_PCA_Data_Highlights_Karnataka.pdf",
+    "markdown_filename": "PC11_PCA_Data_Highlights_Karnataka.md"
+  },
+  {
+    "document_id": "census-2011-odisha-pca-highlights",
+    "title": "Primary Census Abstract Data Highlights: Odisha",
+    "region": "Odisha",
+    "pdf_filename": "PC11_PCA_Data_Highlights_Odisha.pdf",
+    "markdown_filename": "PC11_PCA_Data_Highlights_Odisha.md"
+  },
+  {
+    "document_id": "census-2011-madhya-pradesh-pca-highlights",
+    "title": "Primary Census Abstract Data Highlights: Madhya Pradesh",
+    "region": "Madhya Pradesh",
+    "pdf_filename": "PCA Data Highlights MP.pdf",
+    "markdown_filename": "PCA Data Highlights MP.md"
+  }
+]

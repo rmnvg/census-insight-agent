@@ -9,6 +9,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY backend ./backend
 COPY executor ./executor
 COPY scripts ./scripts
+COPY evals ./evals
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"

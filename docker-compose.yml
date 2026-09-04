@@ -1,4 +1,15 @@
 services:
+  ocr-review:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile.ocr
+    network_mode: none
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+
   backend:
     build:
       context: .
@@ -12,6 +23,10 @@ services:
       GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
       GEMINI_EMBEDDING_DIMENSION: ${GEMINI_EMBEDDING_DIMENSION:-768}
       QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-census_documents}
+      DATA_ROOT: /app/data
+      SPARSE_EMBEDDING_MODEL: ${SPARSE_EMBEDDING_MODEL:-Qdrant/bm25}
+      INGESTION_VERSION: ${INGESTION_VERSION:-1}
     ports:
       - "8000:8000"
     volumes:
@@ -19,6 +34,9 @@ services:
         source: ${GOOGLE_CREDENTIALS_HOST_PATH:?Set GOOGLE_CREDENTIALS_HOST_PATH to an ADC JSON file}
         target: /var/secrets/google/adc.json
         read_only: true
+      - type: bind
+        source: ./data
+        target: /app/data
     depends_on:
       qdrant:
         condition: service_healthy

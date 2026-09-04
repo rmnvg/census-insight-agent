@@ -1,0 +1,1 @@
+"""Citation-safe document ingestion."""

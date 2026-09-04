@@ -1,4 +1,4 @@
-.PHONY: sync test format format-check lint typecheck check verify-vertex run-backend run-frontend run-executor
+.PHONY: sync test format format-check lint typecheck check verify-vertex ingest-dry-run run-backend run-frontend run-executor
 
 sync:
 	uv sync --frozen
@@ -22,6 +22,9 @@ check: format-check lint typecheck test
 
 verify-vertex:
 	uv run --frozen python scripts/verify_vertex.py
+
+ingest-dry-run:
+	uv run --frozen python -m backend.app.ingestion.cli ingest --source-dir data/source --dry-run
 
 run-backend:
 	uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
