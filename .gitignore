@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+htmlcov/
+.coverage
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+.secrets/
+secrets/
+credentials/
+**/credentials/
+*credentials*.json
+*service-account*.json
+*service_account*.json
+adc.json
+
+# Local data and workspace artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/normalized/*
+!data/normalized/.gitkeep
+workspace/*
+!workspace/.gitkeep
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
