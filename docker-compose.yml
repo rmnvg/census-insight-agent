@@ -5,17 +5,18 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-true}
-      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
-      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:?Set GOOGLE_CLOUD_PROJECT in .env}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-global}
       GOOGLE_APPLICATION_CREDENTIALS: /var/secrets/google/adc.json
-      GEMINI_CHAT_MODEL: ${GEMINI_CHAT_MODEL:-}
-      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-}
+      GEMINI_CHAT_MODEL: ${GEMINI_CHAT_MODEL:-gemini-2.5-flash}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      GEMINI_EMBEDDING_DIMENSION: ${GEMINI_EMBEDDING_DIMENSION:-768}
       QDRANT_URL: http://qdrant:6333
     ports:
       - "8000:8000"
     volumes:
       - type: bind
-        source: ${GOOGLE_CREDENTIALS_HOST_PATH:-./.secrets/google/adc.json}
+        source: ${GOOGLE_CREDENTIALS_HOST_PATH:?Set GOOGLE_CREDENTIALS_HOST_PATH to an ADC JSON file}
         target: /var/secrets/google/adc.json
         read_only: true
     depends_on:

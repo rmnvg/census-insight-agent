@@ -1,4 +1,4 @@
-.PHONY: sync test format format-check lint typecheck check run-backend run-frontend run-executor
+.PHONY: sync test format format-check lint typecheck check verify-vertex run-backend run-frontend run-executor
 
 sync:
 	uv sync --frozen
@@ -19,6 +19,9 @@ typecheck:
 	uv run --frozen mypy
 
 check: format-check lint typecheck test
+
+verify-vertex:
+	uv run --frozen python scripts/verify_vertex.py
 
 run-backend:
 	uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
