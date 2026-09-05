@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     data_root: Path = Path("data")
     sparse_embedding_model: str = "Qdrant/bm25"
     ingestion_version: str = "1"
+    workspace_root: Path = Path("workspace")
+    skills_dir: Path = Path("skills")
+    agent_max_steps: int = 16
+    agent_max_tool_calls: int = 6
+    agent_memory_turn_threshold: int = 12
+    agent_provider_timeout_seconds: float = 60.0
+    agent_request_timeout_seconds: float = 180.0
+    agent_provider_max_retries: int = 0
+    agent_assessment_max_characters: int = 12_000
+    agent_assessment_max_chunks: int = 12
 
     @model_validator(mode="after")
     def validate_vertex_configuration(self) -> "Settings":

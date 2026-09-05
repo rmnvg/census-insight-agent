@@ -9,6 +9,7 @@ dependencies = [
     "google-genai==2.22.0",
     "langchain-google-genai==4.4.0",
     "langgraph>=0.6.0",
+    "langgraph-checkpoint-sqlite==3.0.3",
     "pydantic-settings==2.15.0",
     "pymupdf4llm>=0.0.27",
     "qdrant-client[fastembed]==1.19.0",

@@ -80,3 +80,95 @@ candidate evidence as requiring claim validation. A similarity or fusion score a
 that retrieved text entails the requested claim: even an out-of-corpus query receives a dense
 nearest neighbour. A later agent must validate claims against exact evidence and account for page
 coverage limitations before answering or refusing.
+
+## Citation-grounded conversational graph
+
+```mermaid
+flowchart LR
+    M[Load bounded memory] --> C[Classify task]
+    C -->|unsupported/ambiguous| R[Refuse or clarify]
+    C --> Q[Resolve standalone query]
+    Q --> P[Bounded plan]
+    P --> S[Load applicable skill]
+    S --> T[Call typed tools]
+    T --> E[Assess evidence]
+    E -->|insufficient| R
+    E --> A[Synthesize structured claims]
+    A --> V[Validate provenance and support]
+    V -->|valid| F[Persist result and trace]
+    V -->|invalid, first time| X[One constrained repair]
+    X --> V
+    V -->|invalid again| R
+    R --> F
+```
+
+The graph has a 16-step recursion limit, at most six tool calls, one repair, and bounded provider
+timeouts. Nodes return typed state; `messages` uses LangGraph's message reducer so follow-up turns
+append rather than replace history. Classification and query resolution are structured Gemini
+operations informed by recent conversation. Factual follow-ups retrieve again because prior
+assistant messages are context, not Census evidence. The narrow `source_support` exception does
+not trust that prose: it resolves against structured validated-claim history, fetches exact current
+Qdrant points by evidence ID, verifies provenance, and rebuilds exact citations without embeddings.
+
+### Memory and persistence boundaries
+
+- `AsyncSqliteSaver` stores short-term graph checkpoints in `workspace/checkpoints.sqlite`, keyed by
+  the validated application session ID. When history exceeds the configured threshold, older turns
+  are summarized only for preferences, open references, and intent, then removed; source facts are
+  deliberately not promoted into memory.
+- `workspace/sessions/{session_id}/traces/` stores safe operational events and future artifacts. It
+  excludes credentials, prompts, chain-of-thought, tokens, and vectors.
+- Qdrant remains the document-knowledge store. Conversation checkpoints never become source
+  evidence and never replace citation-safe retrieval.
+- Only successful validated claim/citation metadata is retained for at most eight turns: structured
+  scope/value/unit, evidence and citation IDs, document IDs, physical pages, and source checksums.
+  Failed and refused turns cannot replace it; raw chunks, vectors, prompts, and reasoning are absent.
+
+### Tool and skill contracts
+
+`search_documents` validates a standalone query and optional document/region filters and defaults
+to ten results because real-corpus Recall@10 reached 1.00 while relevant evidence sometimes ranked
+below five. `list_documents`, `get_document_coverage`, `list_skills`, and `read_skill` expose only
+typed metadata. Summary requests enumerate page-distributed section representatives instead of
+summarizing the first top-k hits. Comparisons retrieve every requested side independently. The
+internal arithmetic helper permits only sum, difference, and percentage difference; general code
+execution remains pending Prompt 5.
+
+Skills are non-executable Markdown with validated front matter. Only safe names within the
+configured directory are readable, and only the skill matching the classified task is loaded.
+Document instructions can never override system safety.
+
+### Claim validation and refusal
+
+Gemini selects retrieved chunk IDs but never supplies citation metadata. The application resolves
+document, page, section, and verbatim snippet from current-run evidence. It rejects unknown IDs,
+missing claim citations, non-positive or mismatched provenance, non-verbatim snippets, excluded
+pages, and heading-only evidence. A structured semantic support check may reject a claim but cannot
+override deterministic provenance failures. One constrained repair is allowed; a second failure
+returns no unsupported factual answer.
+
+Insufficient evidence produces a citation-safe refusal, while excluded visual coverage is disclosed
+without claiming that the fact is absent from the authoritative PDF. Out-of-scope requests explain
+the supplied-Census-document boundary. Artifact intents return a typed `capability_pending` result
+until Prompt 5 adds the isolated executor and rendering pipeline.
+
+### Structured comparison and checkpoint contracts
+
+Source claims carry structured metric, region, year, population/residence scope, value, unit, and
+trusted evidence IDs. Quote matching may normalize markup and equivalent percent wording only while
+checking support; displayed evidence is always one untouched contiguous slice of the trusted chunk.
+For tables, that slice includes the relevant row and preceding headers. Region identity may come
+from trusted document metadata, while population/category context may come from the chunk's trusted
+section path.
+
+The application owns comparison arithmetic. Two percentage rates default to an arithmetic
+difference measured in percentage points; relative percentage difference is used only when the user
+explicitly asks for a percent-higher/lower or relative comparison. Derived claims are generated from
+validated calculation results, reference both input claim IDs, and inherit both sources. They are
+validated mathematically rather than requiring the derived result to occur in either document.
+
+New checkpoints use schema version 3. Application Pydantic models are converted to JSON-safe
+primitives at every graph-node boundary and reconstructed with validated model constructors on node
+entry. LangGraph's registered message values remain under its message reducer. Development
+checkpoints created before schema version 3 are retained. Successful pre-v3 traces can seed a
+bounded claim-history migration, while current Qdrant payloads remain the only source evidence.

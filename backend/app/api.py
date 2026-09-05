@@ -1,9 +1,18 @@
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
 
+from backend.app.agent.models import (
+    AgentErrorResponse,
+    AgentResponse,
+    RunTrace,
+    SessionContextStatus,
+    SessionRecord,
+)
+from backend.app.agent.service import AgentChatError, UnknownSessionError, get_agent_service
 from backend.app.config import get_settings
 from backend.app.ingestion.models import IngestionReport
 from backend.app.ingestion.service import IngestionService
@@ -19,6 +28,72 @@ from backend.app.retrieval.service import HybridRetrievalService
 from backend.app.retrieval.sparse import BM25SparseEncoder
 
 router = APIRouter()
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+@router.post("/sessions", response_model=SessionRecord, tags=["agent"])
+async def create_session() -> SessionRecord:
+    return await get_agent_service().create_session()
+
+
+@router.get("/sessions/{session_id}", response_model=SessionRecord, tags=["agent"])
+async def get_session(session_id: str) -> SessionRecord:
+    try:
+        session = await get_agent_service().get_session(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if session is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return session
+
+
+@router.get("/sessions/{session_id}/context", response_model=SessionContextStatus, tags=["agent"])
+async def get_session_context(session_id: str) -> SessionContextStatus:
+    try:
+        return await get_agent_service().get_context_status(session_id)
+    except UnknownSessionError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post(
+    "/chat",
+    response_model=AgentResponse,
+    responses={504: {"model": AgentErrorResponse}},
+    tags=["agent"],
+)
+async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
+    try:
+        return await get_agent_service().chat(request.session_id, request.message)
+    except UnknownSessionError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except AgentChatError as error:
+        payload = AgentErrorResponse(
+            error_code=error.error.code,
+            message=error.error.message,
+            session_id=error.session_id,
+            trace_id=error.run_id,
+            retryable=error.error.retryable,
+        )
+        return JSONResponse(status_code=504, content=payload.model_dump())
+
+
+@router.get("/runs/{run_id}/trace", response_model=RunTrace, tags=["agent"])
+def run_trace(run_id: str) -> RunTrace:
+    try:
+        trace = get_agent_service().get_trace(run_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Unknown run")
+    return trace
 
 
 class IngestRequest(BaseModel):

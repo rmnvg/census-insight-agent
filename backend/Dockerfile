@@ -10,6 +10,7 @@ COPY backend ./backend
 COPY executor ./executor
 COPY scripts ./scripts
 COPY evals ./evals
+COPY skills ./skills
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"

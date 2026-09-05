@@ -17,6 +17,9 @@ def test_settings_accept_complete_vertex_configuration() -> None:
 
     assert settings.google_genai_use_vertexai is True
     assert settings.gemini_embedding_dimension == 768
+    assert settings.agent_provider_max_retries == 0
+    assert settings.agent_assessment_max_characters == 12_000
+    assert settings.agent_assessment_max_chunks == 12
 
 
 def test_settings_reject_missing_project() -> None:

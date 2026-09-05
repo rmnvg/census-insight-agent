@@ -14,6 +14,6 @@ def get_chat_model(settings: Settings | None = None) -> BaseChatModel:
         vertexai=True,
         api_key=None,
         temperature=0,
-        request_timeout=60,
-        max_retries=2,
+        request_timeout=resolved.agent_provider_timeout_seconds,
+        max_retries=0,
     )

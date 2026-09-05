@@ -22,6 +22,7 @@ class RetrievedEvidence(BaseModel):
     section_path: list[str]
     extraction_method: IndexedExtractionMethod
     coverage_status: PageCoverageStatus
+    source_checksum: str = ""
     retrieval_score: float
 
 

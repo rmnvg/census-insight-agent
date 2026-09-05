@@ -163,3 +163,85 @@ docker compose run --rm --no-deps backend uv run --frozen python -m backend.app.
 An unchanged ingestion is skipped before dense or sparse embedding and before any Qdrant upsert.
 The ingestion report exposes embedding-request, sparse-embedding, upsert-operation, and upserted-point
 counters so a zero-work rerun is auditable.
+
+## Conversational agent API
+
+Start the persistent API and its existing Qdrant dependency:
+
+```shell
+docker compose up -d --build qdrant backend
+```
+
+Create a session, retaining the returned `session_id`:
+
+```shell
+curl -X POST http://localhost:8000/sessions
+```
+
+Send a turn using that validated session ID:
+
+```shell
+curl -X POST http://localhost:8000/chat \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"SESSION_ID","message":"What was the literacy rate in Karnataka in 2011?"}'
+```
+
+The response `trace_id` identifies its safe structured trace:
+
+```shell
+curl http://localhost:8000/runs/TRACE_ID/trace
+```
+
+Check session metadata with `GET /sessions/{session_id}`. Checkpoints persist in
+`workspace/checkpoints.sqlite`; run traces persist under
+`workspace/sessions/{session_id}/traces/{run_id}.json`. Neither contains credentials or vectors.
+New checkpoints carry schema version 3 and store application state as JSON-safe primitives,
+including a bounded history of validated claim metadata. Pre-v3 successful traces are migrated
+without treating assistant prose as evidence.
+
+Replay the saved Prompt 4F comparison without Gemini and without Qdrant writes:
+
+```shell
+docker compose run --rm --no-deps backend uv run --frozen python scripts/replay_turn2.py \
+  --trace /app/workspace/sessions/25f5f5982d0645d19ee909be14fa9a84/traces/30e4237c-b44d-4703-aaae-93fb9bcbab71.json \
+  --qdrant-url http://qdrant:6333 \
+  --collection census_documents \
+  --output /app/data/processed/agent-turn2-offline-replay.json
+```
+
+The four-turn live smoke test is deliberately manual because it invokes paid Vertex Gemini calls:
+
+```shell
+docker compose exec backend uv run --frozen python scripts/smoke_agent_memory.py \
+  --base-url http://localhost:8000
+```
+
+Replay the source-page follow-up from current Qdrant points without Gemini, embeddings, or writes:
+
+```shell
+docker compose run --rm --no-deps backend uv run --frozen python scripts/replay_turn3.py \
+  --session-id 98194e7f49d4468f823359f020522028 \
+  --output /app/data/processed/agent-turn3-offline-replay.json
+```
+
+After Turns 1 and 2 pass, resume that session at Turn 3 without repeating the paid turns:
+
+```shell
+docker compose exec backend uv run --frozen python scripts/smoke_agent_memory.py \
+  --base-url http://localhost:8000 --session-id SESSION_ID --start-turn 3
+```
+
+Agent requests have a configurable overall deadline (`AGENT_REQUEST_TIMEOUT_SECONDS`, default 180)
+and a per-provider-call budget (`AGENT_PROVIDER_TIMEOUT_SECONDS`, default 60). The application
+defaults to no timeout retry so one provider attempt receives the complete call budget; SDK retries
+are also disabled so deadlines do not stack. Comparison assessment input is bounded by
+`AGENT_ASSESSMENT_MAX_CHARACTERS` (default 12000) and `AGENT_ASSESSMENT_MAX_CHUNKS` (default 12),
+while retaining complete chunks from both regions. Evidence-assessment timeouts return HTTP 504
+with a retryable error and persisted trace ID.
+A failed turn is not advanced as the session's successful checkpoint. Retry by sending the same
+user message once after inspecting the failed trace; the failed attempt is not duplicated in model
+conversation context.
+
+Runtime Markdown skills are read only from `skills/`. Summary and inconsistency skills guide the
+agent; chart and table requests return `capability_pending`. Code execution and artifact rendering
+remain pending for Prompt 5.
