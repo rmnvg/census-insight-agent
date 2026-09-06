@@ -18,6 +18,10 @@ from backend.app.retrieval.service import HybridRetrievalService
 
 _WORD = re.compile(r"[a-z0-9]+")
 
+# Statement-title qualifiers that mark a genuinely different table from the plain metric
+# (e.g. "Child Sex Ratio", "Sex Ratio among Scheduled Castes/Tribes" vs plain "Sex Ratio").
+_RANKING_QUALIFIER_WORDS = {"child", "children", "scheduled", "caste", "castes", "tribe", "tribes"}
+
 
 def _words(value: str) -> set[str]:
     return set(_WORD.findall(value.casefold()))
@@ -210,15 +214,21 @@ class AgentTools:
             records.extend(page)
             if offset is None:
                 break
+        disqualifying_modifiers = _RANKING_QUALIFIER_WORDS - metric_words
         matched: list[RetrievedEvidence] = []
         for record in records:
             payload = record.payload or {}
             section = " ".join(str(value) for value in payload.get("section_path", []))
             context = f"{section} {str(payload.get('text', ''))[:400]}"
-            if metric_words and metric_words <= _words(context):
-                matched.append(
-                    RetrievedEvidence.model_validate({**payload, "retrieval_score": 0.0})
-                )
+            context_words = _words(context)
+            if not metric_words or not metric_words <= context_words:
+                continue
+            if disqualifying_modifiers & context_words:
+                # e.g. a plain "sex ratio" request must not pull in the distinct "Child Sex
+                # Ratio" or "Sex Ratio among Scheduled Castes/Tribes" statement tables, which
+                # otherwise match on the "sex ratio" word subset alone.
+                continue
+            matched.append(RetrievedEvidence.model_validate({**payload, "retrieval_score": 0.0}))
         return sorted(matched, key=lambda item: item.page_number)
 
     async def expand_candidate_pages(

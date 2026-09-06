@@ -424,9 +424,18 @@ dynamic imports, absolute paths, or parent traversal. The JSON root is an envelo
 and `source_manifest` keys: read rows and display metadata from `payload["dataset"]`, and write
 `payload["source_manifest"]` unchanged to the declared manifest output. The output directory already
 exists; do not create directories. Use literal relative output paths or variables assigned directly
-from those literal Path values. Prefer `Path("input.json").read_text()` and
-`Path("output/...").write_text()` for JSON I/O. Preserve dataset rows exactly in CSV. Charts need
-labeled axes, units, deterministic style,
+from those literal Path values. Every `to_csv`, `savefig`, and `write_text` call must take that
+same literal declared path directly as its argument, not a variable built through renaming,
+joining, or reformatting it. Never build an output path with the `/` operator (e.g.
+`Path("output") / "table.csv"`); write it as one inline literal instead, either the bare string
+`"output/table.csv"` or `Path("output/table.csv")`. Always call `to_csv` with that literal output
+path as its own first argument, e.g. `df.to_csv("output/table.csv", index=False)`; never call
+`to_csv()` with no path argument and write its returned string separately. Prefer
+`Path("input.json").read_text()` and
+`Path("output/...").write_text()` for JSON I/O. Preserve dataset rows exactly in CSV, including
+column names: do not call DataFrame/Series `.rename()`; if friendlier column headers are wanted
+for the Markdown table, build that string directly rather than mutating a DataFrame's columns.
+Charts need labeled axes, units, deterministic style,
 tight_layout, at least 120 DPI, and a zero numeric baseline unless explicitly justified. Do not use
 a line chart for unordered categories. Return only the complete program in the code field.""",
             f"Applicable skill:\n{skill}\n\nDeclared outputs: {outputs}\n"

@@ -230,6 +230,44 @@ Path(manifest_path).write_text("{}")
     assert validate_code(code).valid
 
 
+def test_ast_allows_slash_joined_output_paths_when_both_operands_are_static() -> None:
+    code = """
+from pathlib import Path
+import pandas as pd
+
+output_dir = Path("output")
+frame = pd.DataFrame([{"value": 1}])
+frame.to_csv(output_dir / "table.csv", index=False)
+(output_dir / "table.md").write_text("| value |\\n|---|\\n| 1 |")
+"""
+    assert validate_code(code).valid
+
+
+def test_ast_rejects_slash_joined_path_with_dynamic_operand() -> None:
+    code = """
+from pathlib import Path
+import pandas as pd
+
+output_dir = Path("output")
+frame = pd.DataFrame([{"value": 1}])
+filename = str(len(frame))
+frame.to_csv(output_dir / filename, index=False)
+"""
+    assert not validate_code(code).valid
+
+
+def test_ast_rejects_slash_joined_path_escaping_output_directory() -> None:
+    code = """
+from pathlib import Path
+import pandas as pd
+
+base = Path("output")
+frame = pd.DataFrame([{"value": 1}])
+frame.to_csv(base / ".." / "escaped.csv", index=False)
+"""
+    assert not validate_code(code).valid
+
+
 def test_ast_allows_open_only_for_static_job_input_and_outputs() -> None:
     code = """
 from pathlib import Path

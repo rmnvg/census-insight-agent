@@ -85,14 +85,19 @@ def build_artifact_requirement(
     if task_type not in {"artifact_chart", "artifact_table"}:
         return None
     if classification.artifact_requirement is not None:
+        rank_all = classification.artifact_requirement.rank_all
+        target_regions = (
+            []
+            if rank_all
+            else classification.artifact_requirement.regions or classification.regions
+        )
         requirement = classification.artifact_requirement.model_copy(
             update={
                 "artifact_type": "chart" if task_type == "artifact_chart" else "table",
-                "regions": classification.artifact_requirement.regions or classification.regions,
+                "regions": target_regions,
                 "comparison": bool(
-                    classification.artifact_requirement.comparison
-                    or len(classification.artifact_requirement.regions or classification.regions)
-                    > 1
+                    not rank_all
+                    and (classification.artifact_requirement.comparison or len(target_regions) > 1)
                 ),
             }
         )

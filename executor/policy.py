@@ -229,6 +229,14 @@ class _PolicyVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Attribute) and node.attr == "parent":
             path = self._resolve_path(node.value)
             return path.parent if path is not None else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            # `Path("output") / "table.csv"` is the standard pathlib join idiom and is exactly
+            # as statically analyzable as a single string literal: both operands still have to
+            # resolve through this same strict recursion, and the combined result still passes
+            # through the unchanged _is_safe_output_path/_validate_path_argument checks below.
+            left = self._resolve_path(node.left)
+            right = self._resolve_path(node.right)
+            return left / right if left is not None and right is not None else None
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return PurePosixPath(node.value)
         return None

@@ -21,7 +21,11 @@ from backend.app.execution.contracts import (
     ArtifactRowProposal,
     SourceRecord,
 )
-from backend.app.execution.hydration import count_table_entity_rows
+from backend.app.execution.hydration import (
+    ProposalHydrationError,
+    count_table_entity_rows,
+    hydrate_artifact_dataset,
+)
 from backend.app.execution.presentation import artifact_response
 from backend.app.retrieval.models import RetrievedEvidence
 from backend.tests.test_agent_service import FakeTools
@@ -294,3 +298,72 @@ def test_collect_metric_table_rows_filters_by_metric_keywords() -> None:
     )
     result = run(tools.collect_metric_table_rows("doc-mp", "sex ratio"))
     assert [item.chunk_id for item in result] == ["chunk-sex-ratio-1"]
+
+
+# Verbatim fragment fetched live from the ingested Qdrant collection (chunk
+# 2e41fa58-20cb-5447-bdee-24f4f2868b48, page 33 of the Madhya Pradesh document): a later
+# split of the Statement 6 table that repeats only the top-level year header, not the
+# Total/Rural/Urban sub-header row. Discovered by testing the ranking feature against the
+# real corpus, not by construction, so it is worth pinning as a regression test.
+REAL_FRAGMENT_MISSING_SUBHEADER = (
+    "1 > 9 से 28 फरवरी > **Statement 5 : Proportion of rural and urban population : 2001-2011**\n\n"
+    "| State/<br>District<br>Code | State/<br>District    | Sex Ratio<br>2001 |       |       "
+    "| Sex Ratio<br>2011 |       |       |\n"
+    "|----------------------------|-----------------------|-------------------|-------|-------"
+    "|-------------------|-------|-------|\n"
+    "| 433                        | Mandsaur              | 956               | 960   | 941   "
+    "| 963               | 965   | 957   |\n"
+    "| 434                        | Ratlam                | 958               | 964   | 943   "
+    "| 971               | 975   | 962   |\n"
+)
+
+
+def real_fragment_evidence() -> RetrievedEvidence:
+    return district_evidence(chunk_id="chunk-mandsaur-ratlam").model_copy(
+        update={
+            "text": REAL_FRAGMENT_MISSING_SUBHEADER,
+            "citation_snippet": REAL_FRAGMENT_MISSING_SUBHEADER,
+            "section_path": ["Statement 6", "Sex Ratio"],
+        }
+    )
+
+
+def test_hydrate_matches_row_when_subheader_missing_from_local_fragment() -> None:
+    evidence_item = real_fragment_evidence()
+    proposal = ArtifactDatasetProposal(
+        title="Sex ratio by district",
+        rows=[proposed_row("Ratlam", 971, evidence_id="chunk-mandsaur-ratlam")],
+    )
+    dataset = hydrate_artifact_dataset(
+        proposal, ranking_requirement(), [evidence_item], "test query"
+    )
+    assert dataset.source_records[0].raw_value == "971"
+    assert dataset.source_records[0].region == "Ratlam"
+
+
+def test_hydrate_rejects_wrong_residence_even_with_group_fallback() -> None:
+    evidence_item = real_fragment_evidence()
+    # 975 is Ratlam's 2011 Rural value, not Total; the group-position fallback must still
+    # reject it when asked for Total residence rather than accepting any value in the group.
+    proposal = ArtifactDatasetProposal(
+        title="Sex ratio by district",
+        rows=[proposed_row("Ratlam", 975, evidence_id="chunk-mandsaur-ratlam")],
+    )
+    with pytest.raises(ProposalHydrationError):
+        hydrate_artifact_dataset(proposal, ranking_requirement(), [evidence_item], "test query")
+
+
+def test_hydrate_ignores_unit_description_not_present_in_local_fragment() -> None:
+    # Discovered live: the model often describes a unit verbosely ("females per 1000 males")
+    # using wording that only appears in the table's title chunk, not the row fragment being
+    # matched. Unit doesn't affect which cell is selected (metric/year/residence/value already
+    # do), so a rank_all proposal must not be rejected solely because of this label mismatch.
+    evidence_item = real_fragment_evidence()
+    row = proposed_row("Ratlam", 971, evidence_id="chunk-mandsaur-ratlam").model_copy(
+        update={"unit": "females per 1000 males"}
+    )
+    proposal = ArtifactDatasetProposal(title="Sex ratio by district", rows=[row])
+    dataset = hydrate_artifact_dataset(
+        proposal, ranking_requirement(), [evidence_item], "test query"
+    )
+    assert dataset.source_records[0].raw_value == "971"

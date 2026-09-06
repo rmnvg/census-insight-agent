@@ -114,6 +114,41 @@ def _forward_fill(cells: list[str], width: int) -> list[str]:
     return values[:width]
 
 
+_RESIDENCE_GROUP_OFFSETS = {"total": 0, "rural": 1, "urban": 2}
+
+
+def _residence_by_group_position(
+    column: int, header_rows: list[list[str]], width: int, residence: str
+) -> bool:
+    """Fall back to the fixed Total/Rural/Urban column convention.
+
+    A table split across ingestion chunks repeats only its top-level year header on later
+    fragments (e.g. "Sex Ratio 2011"), dropping the Total/Rural/Urban sub-header row that
+    would otherwise disambiguate residence textually. Every multi-residence statement table
+    observed in this corpus uses the same fixed Total, Rural, Urban column order within each
+    contiguous year group, so a column is accepted only when it sits at the exact offset for
+    the requested residence within an unambiguous 3-column group sharing one top-level header.
+    This never changes what text is cited — only which column is treated as a candidate.
+    """
+    if not header_rows:
+        return False
+    offset = _RESIDENCE_GROUP_OFFSETS.get(_fold(residence))
+    if offset is None:
+        return False
+    top = _forward_fill(header_rows[0], width)
+    if column >= len(top) or not top[column]:
+        return False
+    group_start = column
+    while group_start > 0 and top[group_start - 1] == top[column]:
+        group_start -= 1
+    group_end = column
+    while group_end + 1 < len(top) and top[group_end + 1] == top[column]:
+        group_end += 1
+    if group_end - group_start + 1 != 3:
+        return False
+    return column - group_start == offset
+
+
 def _words(value: str) -> set[str]:
     return set(_WORD.findall(_fold(value)))
 
@@ -152,6 +187,7 @@ def _match_row(
     *,
     require_region_label: bool = True,
     require_population_scope: bool = True,
+    require_unit_match: bool = True,
 ) -> tuple[str, str]:
     if require_region_label and _fold(proposal.label) != _fold(evidence.region):
         raise ProposalHydrationError("WRONG_REGION_ROW")
@@ -217,7 +253,9 @@ def _match_row(
                 continue
             if requirement.year is not None and str(requirement.year) not in header_words:
                 continue
-            if _fold(residence) not in _fold(header):
+            if _fold(residence) not in _fold(header) and not _residence_by_group_position(
+                column, header_rows, width, residence
+            ):
                 continue
             if require_population_scope:
                 population_categories = {"persons", "person", "male", "female"}
@@ -231,7 +269,7 @@ def _match_row(
                     continue
             if proposal.series and _fold(proposal.series) not in _fold(header):
                 continue
-            if not _unit_supported(proposal.unit, header, context):
+            if require_unit_match and not _unit_supported(proposal.unit, header, context):
                 continue
             raw_tokens = [
                 token
@@ -288,7 +326,11 @@ def count_table_entity_rows(evidence: list[RetrievedEvidence]) -> int:
                 ),
                 "",
             )
-            folded = label.casefold()
+            # "<br>" tags inside header cells become plain spaces (see _plain/_HTML), so
+            # "State/<br>District<br>Code" folds to "state/ district code" rather than the
+            # spaceless "state/district code" in _HEADER_LABELS; normalize spacing around "/"
+            # before checking the blocklist so both ingested forms are recognized.
+            folded = re.sub(r"\s*/\s*", "/", label.casefold())
             if not folded or folded in _HEADER_LABELS or (state_row and folded == state_row):
                 continue
             labels.add(folded)
@@ -318,6 +360,15 @@ def hydrate_artifact_dataset(
         # the stored metadata to the documented "persons" convention without requiring the word
         # to appear in the trusted table text.
         requirement = requirement.model_copy(update={"population_scope": "persons"})
+    if requirement.rank_all and requirement.residence_scope is None:
+        # Unlike population scope, residence ("Total"/"Rural"/"Urban") is a real column header
+        # in these statement tables, so the default is still fully verified against the table
+        # by the normal _match_row header check below.
+        requirement = requirement.model_copy(update={"residence_scope": "total"})
+    if requirement.rank_all and requirement.year is None:
+        # Every document in this corpus is a Census 2011 report; a ranking request that omits
+        # the year is assumed to mean the current census, still verified against the header.
+        requirement = requirement.model_copy(update={"year": 2011})
     by_id = {item.chunk_id: item for item in evidence}
     rows: list[dict[str, object]] = []
     sources: list[SourceRecord] = []
@@ -343,6 +394,11 @@ def hydrate_artifact_dataset(
             requirement,
             require_region_label=not requirement.rank_all,
             require_population_scope=not skip_population_match,
+            # Unit is a descriptive label, not part of cell selection (metric/year/residence/
+            # population/value already uniquely identify the cell); a ranking proposal's unit
+            # text (e.g. "females per 1000 males") often lives only in a table's title chunk,
+            # not the specific row fragment being matched, so it is not required to verify.
+            require_unit_match=not requirement.rank_all,
         )
         row_id = f"row-{index}"
         rows.append(
