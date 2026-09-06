@@ -7,7 +7,15 @@ from pathlib import Path
 
 def _service_block(compose: str, service: str, next_service: str | None) -> str:
     del next_service
-    start = compose.index(f"  {service}:\n")
+    # Anchor to a line that starts with exactly two spaces of indent (the top-level service
+    # key under `services:`), not a substring search: an unanchored `.index()` can match a
+    # more deeply indented `depends_on: <service>:` reference in an earlier service block,
+    # since e.g. "      executor:\n" (6-space depends_on entry) contains "  executor:\n" as a
+    # trailing substring and would otherwise be found first.
+    match = re.search(rf"(?m)^  {re.escape(service)}:\n", compose)
+    if match is None:
+        raise ValueError(f"service block for '{service}' not found in compose file")
+    start = match.start()
     following = re.search(r"\n(?:  [a-z][\w-]*:|[a-z][\w-]*:)", compose[start + 1 :])
     end = start + 1 + following.start() if following else len(compose)
     return compose[start:end]
