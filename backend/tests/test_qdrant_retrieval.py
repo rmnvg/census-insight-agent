@@ -292,3 +292,6 @@ def test_full_collection_validation_checks_vectors_and_payloads(tmp_path: Path) 
     assert report.invalid_points == 0
     assert report.invalid_by_field == {}
     assert report.non_empty_sparse_vectors == 1
+    assert report.dense_query_results == 1
+    assert report.sparse_query_results == 1
+    assert report.client_server_compatible is True

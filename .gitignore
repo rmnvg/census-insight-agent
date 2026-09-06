@@ -9,6 +9,8 @@ __pycache__/
 htmlcov/
 .coverage
 *.ses
+*.log
+*.tmp
 
 # Environment and credentials
 .env
@@ -30,6 +32,13 @@ data/normalized/*
 !data/normalized/.gitkeep
 workspace/*
 !workspace/.gitkeep
+workspace/checkpoints.sqlite*
+workspace/sessions/
+workspace/execution-queue/
+workspace/artifacts/
+qdrant_storage/
+qdrant-data/
+evals/reports/
 data/processed/*
 !data/processed/.gitkeep
 data/manifests/generated/

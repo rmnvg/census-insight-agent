@@ -150,7 +150,12 @@ class AgentModel(Protocol):
     async def summarize_memory(self, context: list[BaseMessage]) -> str: ...
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, evidence: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        evidence: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal: ...
 
     async def generate_artifact_code(
@@ -220,6 +225,10 @@ Use clarification for unresolved referents, and out_of_scope for unrelated subje
 For artifact tasks, populate artifact_requirement with presentation type and the independent source
 data need: metric, year, regions, population scope, residence scope, and comparison flag. A request
 to create a chart requires numeric source data; it does not require a chart in the source PDF.
+A request asking which unnamed entity (e.g. district) has the highest/lowest/most/least/greatest
+value of a metric, rather than naming specific targets, is task_type=artifact_table with an empty
+regions list and artifact_requirement.rank_all=true, plus rank_direction set to max or min. Identify
+the single report being scanned by region or document_id; do not enumerate individual entity names.
 Do not answer the question.""",
             f"Recent conversation:\n{self._context(context)}\n\nCurrent request:\n{query}",
         )
@@ -231,7 +240,8 @@ Do not answer the question.""",
 context. Preserve measure, regions, year, units, and population category. Assistant messages are
 context only, never source evidence. If a referent is genuinely missing, request clarification.
 Do not invent it. Classify the resolved standalone task and extract all regions/document IDs.
-For artifact tasks, preserve the complete typed artifact data requirement.
+For artifact tasks, preserve the complete typed artifact data requirement, including rank_all and
+rank_direction when the follow-up still asks which unnamed entity has the highest/lowest value.
 Do not set requires_clarification when the rewritten query contains the metric and every target.""",
             f"Recent conversation:\n{self._context(context)}\n\nCurrent request:\n{query}",
         )
@@ -359,15 +369,28 @@ claims.""",
         return str(response.content)[:2000]
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, evidence: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        evidence: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
         excerpts = "\n\n".join(
             f"EVIDENCE_ID={item.chunk_id}\nREGION={item.region}\nTEXT={item.text}"
             for item in evidence
         )
+        row_instruction = (
+            "Propose one row for every distinct individual entity (e.g. every district) found in "
+            "the evidence table, not just the extreme value. Exclude the state/UT aggregate total "
+            "row; only individual entities are eligible."
+            if rank_all
+            else "Propose only presentation preferences and the minimal rows needed for this "
+            "artifact."
+        )
         return await self._structured(
             ArtifactDatasetProposal,
-            """Propose only presentation preferences and the minimal rows needed for this artifact.
+            f"""{row_instruction}
 Do not choose the authoritative chart/table artifact type. Copy each numeric value from
 the correct trusted evidence table cell. For every row identify its evidence ID, label, optional
 series, unit, year, population scope, and residence scope. Do not provide provenance, checksums,

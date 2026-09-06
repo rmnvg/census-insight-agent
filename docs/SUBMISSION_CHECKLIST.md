@@ -1,0 +1,21 @@
+# Submission Checklist
+
+- [ ] Temporary clean-clone/export test completed
+- [ ] `.env` configured locally and still ignored
+- [ ] Vertex ADC setup documented and verified manually
+- [ ] `docker compose up --build` succeeds
+- [ ] Qdrant, executor, backend, and frontend are healthy
+- [ ] Existing Qdrant collection has exactly 2,058 validated points
+- [ ] `make check` passes
+- [ ] `make verify-offline` passes against the local corpus
+- [ ] Optional paid live harness run is reviewed (or explicitly marked not run)
+- [ ] Main UI, citation, chart, table, and trace screenshots are captured from verified output
+- [ ] README links and copy-paste commands checked
+- [ ] `DESIGN.md` reviewed
+- [ ] `FAILURE_ANALYSIS.md` reviewed
+- [ ] Tracked files and Git history pass `make secret-scan`
+- [ ] No `.env`, ADC, checkpoint, trace, artifact, report, corpus, or Qdrant volume is staged
+- [ ] Repository visibility is set intentionally
+- [ ] Final GitHub URL is tested in a signed-out browser
+- [ ] Five-minute video follows `docs/VIDEO_SCRIPT.md`
+- [ ] Final email/message includes repository URL, video URL, setup caveat, and live-evaluation status

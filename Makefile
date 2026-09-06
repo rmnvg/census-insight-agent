@@ -1,4 +1,4 @@
-.PHONY: sync test format format-check lint typecheck check verify-vertex ingest-dry-run run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security
+.PHONY: sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval
 
 sync:
 	uv sync --frozen
@@ -18,13 +18,31 @@ lint:
 typecheck:
 	uv run --frozen mypy
 
-check: format-check lint typecheck test
+check:
+	sh scripts/check.sh
+
+verify-offline: check qdrant-readonly
+
+qdrant-readonly:
+	uv run --frozen python -m backend.app.retrieval.validation --expected-points 2058
+
+security:
+	uv run --frozen python scripts/verify_security.py
+
+secret-scan:
+	uv run --frozen python scripts/scan_secrets.py --history
 
 verify-vertex:
 	uv run --frozen python scripts/verify_vertex.py
 
 ingest-dry-run:
 	uv run --frozen python -m backend.app.ingestion.cli ingest --source-dir data/source --dry-run
+
+initialize-corpus:
+	uv run --frozen python scripts/initialize_corpus.py
+
+live-eval:
+	uv run --frozen python scripts/live_evaluation.py
 
 run-backend:
 	uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload

@@ -1,401 +1,192 @@
-# census-insight-agent
+# Census Insight Agent
 
-Citation-safe ingestion and hybrid evidence retrieval services for a census insight agent. See [docs/DECISIONS.md](docs/DECISIONS.md) for the fixed architecture decisions.
+Census Insight Agent is a citation-grounded assistant for three supplied Census 2011 state reports. It combines provided-Markdown-first ingestion, physical PDF-page provenance, Vertex AI Gemini, Qdrant dense+sparse retrieval, LangGraph memory, and a network-isolated artifact executor. Every factual claim maps to an exact source span; uncertain visual pages are disclosed as coverage limitations rather than converted into unsafe evidence.
 
-## Development
+## Capabilities and architecture
 
-Requires Python 3.12 and `uv`.
+- Grounded lookup, comparison, summary, source-follow-up, and inconsistency analysis
+- Mandatory dense + BM25 sparse retrieval fused by Qdrant RRF
+- Exact citation quotes with one-based physical PDF pages
+- LangGraph SQLite conversation memory and runtime Markdown skills
+- Validated PNG/CSV/Markdown artifacts with checksum-bound source manifests
+- Typed operational failures, sanitized traces, and a separated Streamlit UI
 
-```shell
-cp .env.example .env
-uv sync --frozen
-make check
+```mermaid
+flowchart LR
+  subgraph P[Presentation plane]
+    U[User] --> UI[Streamlit :8501]
+  end
+  subgraph A[Agent / orchestration plane]
+    UI --> API[FastAPI :8000]
+    API --> LG[LangGraph]
+    LG --> V[Vertex Gemini via ADC]
+    LG --> S[Runtime skills]
+    LG --> M[SQLite checkpointer]
+  end
+  subgraph E[Source / evidence plane]
+    LG --> R[Hybrid retrieval]
+    R --> VE[Vertex embeddings]
+    R --> BM[Local BM25]
+    R --> Q[Qdrant RRF :6333]
+    PDF[Authoritative PDFs] --> Q
+  end
+  subgraph X[Isolated execution plane]
+    LG --> FQ[Filesystem queue]
+    FQ --> EX[Network-disabled executor]
+    EX --> AR[Validated artifacts]
+    AR --> API
+  end
 ```
 
-Run the services locally with the `run-backend`, `run-frontend`, and `run-executor` Make targets, or use Docker Compose after setting `GOOGLE_CREDENTIALS_HOST_PATH` to an ADC JSON file.
+## Prerequisites and credentials
 
-## Streamlit application
+For the complete application, install Docker Engine/Desktop with Compose v2 and the Google Cloud CLI. For host-side development, also install Python 3.12 and [`uv`](https://docs.astral.sh/uv/). The backend requires a Vertex-enabled GCP project and Application Default Credentials (ADC); API-key authentication is unsupported.
 
-Docker Desktop (or Docker Engine with Compose v2), a Vertex-enabled GCP project, and local ADC are
-the only host prerequisites. After completing the ADC setup below, copy `.env.example` to `.env`,
-set the required project/model values and the absolute `GOOGLE_CREDENTIALS_HOST_PATH`, then start
-the complete four-service application:
+```shell
+gcloud auth application-default login
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+cp .env.example .env
+```
+
+In `.env`, set `GOOGLE_CLOUD_PROJECT`, the Gemini model names, and `GOOGLE_CREDENTIALS_HOST_PATH` to the absolute host ADC JSON path. Keep `GOOGLE_APPLICATION_CREDENTIALS=/var/secrets/google/adc.json`; it is the intentional container-local mount. Never copy credentials into the repository.
+
+## Data setup and first initialization
+
+The assignment corpus is ignored because its PDFs and Markdown total about 115 MB. Copy the supplied files into:
+
+```text
+data/source/pdf/
+  PC11_PCA_Data_Highlights_Karnataka.pdf
+  PC11_PCA_Data_Highlights_Odisha.pdf
+  PCA Data Highlights MP.pdf
+data/source/markdown/
+  PC11_PCA_Data_Highlights_Karnataka.md
+  PC11_PCA_Data_Highlights_Odisha.md
+  PCA Data Highlights MP.md
+```
+
+Pairing and reviewed page-coverage decisions are checked in under `data/manifests/`. Run the free dry run first; it makes no Gemini calls and no Qdrant writes:
+
+```shell
+docker compose run --rm --no-deps --build backend uv run --frozen python -m backend.app.ingestion.cli ingest --source-dir /app/data/source --dry-run --report-output /app/data/processed/dry-run-report.json
+python3 -m json.tool data/processed/dry-run-report.json
+```
+
+After reviewing zero failures and the estimated inputs, initialize an empty collection intentionally. The initializer stops unless the paid-call flag is present, skips a valid 2,058-point collection, and never deletes a non-matching collection:
+
+```shell
+docker compose up -d qdrant
+docker compose run --rm backend uv run --frozen python scripts/initialize_corpus.py --allow-paid-calls
+```
+
+Initial ingestion invokes billable Vertex embeddings. A fresh `docker compose up --build` starts the services but cannot answer corpus questions until the assignment files are supplied and initialization is approved.
+
+## Run and review
 
 ```shell
 docker compose up --build
 ```
 
-The first build downloads pinned Python packages and container images and can take several minutes.
-Wait for Qdrant, the executor, backend, and frontend to report healthy. Open:
+The first build and FastEmbed load can take several minutes. Wait for `docker compose ps` to show four healthy services.
 
-- Streamlit: http://localhost:8501
-- FastAPI/OpenAPI: http://localhost:8000/docs
-- Qdrant dashboard: http://localhost:6333/dashboard
+- Streamlit: <http://localhost:8501>
+- FastAPI/OpenAPI: <http://localhost:8000/docs>
+- Qdrant dashboard: <http://localhost:6333/dashboard>
 
-Streamlit creates one backend session on initial load and reuses its identifier for later turns.
-Only the current message and session ID are posted; durable conversational memory comes from the
-backend LangGraph checkpointer. “New conversation” creates an isolated backend session and clears
-only the visible UI history. A browser refresh may create a new Streamlit session because URL-based
-session restoration is not currently implemented.
+Ask these in one UI conversation:
 
-Each structured factual claim is displayed with its supporting document, physical one-based PDF
-page, section path, and untouched citation quote. Validated chart/table artifacts are fetched only
-through FastAPI, displayed inline, and offered as PNG/CSV/Markdown/source-manifest downloads.
-“Execution details” shows an allowlisted operational timeline; it never displays prompts, hidden
-reasoning, vectors, credentials, raw source chunks, local paths, or complete checksums. Expected
-refusals remain normal assistant responses, while provider, backend, executor, schema, and download
-failures are shown as sanitized operational errors.
+1. “What was Karnataka’s literacy rate in 2011?”
+2. “How does that compare with Odisha?”
+3. “Which source pages support those values?”
+4. “Create a bar chart comparing the 2011 total persons literacy rates for Karnataka and Odisha.”
+5. “Create a table comparing the 2011 total, rural, and urban literacy rates for Karnataka and Odisha.”
+6. “Which district had the highest sex ratio in Madhya Pradesh?”
+7. “What was France’s unemployment rate in 2011?”
 
-Run all offline quality checks without calling Gemini:
-
-```shell
-docker compose run --rm --no-deps --build backend uv run --frozen ruff format --check .
-docker compose run --rm --no-deps backend uv run --frozen ruff check .
-docker compose run --rm --no-deps backend uv run --frozen mypy
-docker compose run --rm --no-deps backend uv run --frozen pytest -q
-docker compose run --rm --no-deps backend uv run --frozen python scripts/smoke_ui_offline.py
-docker compose config --quiet
-docker compose exec frontend python -m frontend.security_check
-```
-
-Stop services without removing the persistent Qdrant volume:
+Stop without removing indexed data:
 
 ```shell
 docker compose down
 ```
 
-Do not add `--volumes` unless deletion of indexed data is intentional. If startup fails, check
-`docker compose ps` and `docker compose logs backend executor frontend`; verify ports 8000, 8501,
-6333, and 6334 are free; confirm the ADC host path exists; and verify `.env` has the required GCP
-project/model settings. A healthy UI with a backend error usually means the backend is still
-starting or its ADC/model configuration is invalid. An artifact display warning does not resubmit
-the paid chat request—inspect the sanitized trace and executor health instead.
+Never add `--volumes` unless deleting the local Qdrant collection is intentional.
 
-### Manual evaluator flow
+## Safety and behavior
 
-No live requests are made by the automated suite. To verify manually, open Streamlit and:
+Original PDFs define identity, checksum, page count, and citation page. Supplied Markdown is preferred; PyMuPDF4LLM is fallback-only. Chunks never cross pages. Twelve unsafe Karnataka chart/map pages remain quarantined as `excluded_unverified_visual`; raw OCR never reaches embeddings, Qdrant, retrieval, or generation.
 
-1. Ask “What was Karnataka’s literacy rate in 2011?”
-2. Ask “How does that compare with Odisha?” in the same conversation.
-3. Ask “Which source pages support those values?”
-4. Request a bar chart comparing Karnataka and Odisha literacy rates; inspect and download its PNG,
-   CSV, and source manifest.
-5. Request a table comparing total, rural, and urban literacy rates; inspect and download its CSV,
-   Markdown, and source manifest.
-6. Open “Execution details” and confirm the sanitized ordered trace.
-7. Ask “What was France’s unemployment rate in 2011?” and confirm a graceful scope refusal.
-8. Start a new conversation and confirm the previous session is not reused.
+Every query gets Vertex dense and local BM25 sparse vectors; Qdrant performs RRF. Retrieval is candidate selection only. LangGraph assesses evidence, builds typed claims, selects exact spans from trusted current-run chunks, validates provenance, and answers or refuses. Comparisons reserve evidence budget for both regions.
 
-## Vertex AI prerequisites
+`AsyncSqliteSaver` stores successful conversation state in `workspace/checkpoints.sqlite`. Run-local errors do not become durable claims. Runtime instructions are discovered from `skills/*.md`. Artifact proposals are deterministically hydrated with trusted evidence before generated Python reaches the unprivileged, network-disabled executor.
 
-1. Create or select a Google Cloud project with billing configured.
-2. Enable the Vertex AI API in that project.
-3. Install the Google Cloud CLI and create local Application Default Credentials:
+The executor has no cloud credentials, Qdrant, Docker socket, network, or session workspace. Docker isolation is **not** a hardened hostile multi-tenant sandbox; production use should add a stronger sandbox such as microVM isolation.
 
-   ```shell
-   gcloud auth application-default login
-   gcloud auth application-default set-quota-project census-insight-agent
-   ```
+## Verification and evaluation
 
-4. Copy `.env.example` to `.env` and set:
-
-   - `GOOGLE_GENAI_USE_VERTEXAI=true`
-   - `GOOGLE_CLOUD_PROJECT` to the target project ID
-   - `GOOGLE_CLOUD_LOCATION` (the default is `global`)
-   - `GEMINI_CHAT_MODEL`
-   - `GEMINI_EMBEDDING_MODEL`
-   - `GEMINI_EMBEDDING_DIMENSION=768`
-   - `GOOGLE_CREDENTIALS_HOST_PATH` to the absolute host ADC JSON path
-   - `GOOGLE_APPLICATION_CREDENTIALS=/var/secrets/google/adc.json` for containers
-
-Gemini is accessed only through Vertex AI with ADC. API-key authentication and provider fallback are intentionally unsupported.
-
-### Live verification
-
-The verification performs billable text generation, structured tool-call, and embedding requests. It is intentionally excluded from the unit test suite.
-
-For local verification, the script uses `GOOGLE_CREDENTIALS_HOST_PATH` when the container credential path is not present:
+Host-side checks use the lockfile and make no external model calls:
 
 ```shell
-uv run --frozen python scripts/verify_vertex.py
+uv sync --frozen --all-extras
+make check
+make secret-scan
 ```
 
-For verification inside the backend container:
+With the services and local corpus running, the canonical full offline gate adds an exhaustive read-only collection scan and dense/sparse compatibility queries. It performs no ingestion, Qdrant writes, Gemini generation, or Vertex embeddings:
 
 ```shell
-docker compose run --rm backend python scripts/verify_vertex.py
+make verify-offline
 ```
 
-If a configured model is unavailable, the command reports the Vertex API error. Change `GEMINI_CHAT_MODEL` or `GEMINI_EMBEDDING_MODEL` explicitly after confirming model availability in the configured project and location; the application will not silently select another model.
+Useful individual commands include `make format-check`, `make lint`, `make typecheck`, `make test`, `make ui-smoke`, `make qdrant-readonly`, `docker compose config --quiet`, and `docker compose exec frontend python -m frontend.security_check`.
 
-Never copy ADC JSON files into this repository or a Docker image, and never commit credentials. Docker Compose mounts the configured ADC file read-only into the backend only.
-
-## Documents and ingestion
-
-Place authoritative PDFs in `data/source/pdf/` and preferred supplied Markdown in `data/source/markdown/`. Files pair only when their normalized stems match exactly, such as `Karnataka Census.pdf` and `karnataka_census.md`. For different names or explicit metadata, add a `*.override.json` file under `data/manifests/` with `document_id`, `title`, `region`, `pdf_filename`, and optional `markdown_filename`. Private absolute paths are never written to generated manifests.
-
-Reliable Markdown page markers use one of these forms:
-
-```markdown
-<!-- page: 1 -->
-[PAGE 2]
-```
-
-Without markers, Markdown blocks are aligned to normalized PDF page anchors only when there is a confident unique match. Ambiguous mappings fail ingestion. `--review-override` explicitly discards unresolved Markdown mapping and uses page-specific PyMuPDF4LLM extraction; it never invents a page number.
-
-Run a free dry run, which parses and chunks but does not call Gemini or write Qdrant points:
+The real-corpus retrieval evaluator uses a paid Vertex query embedding and is manual:
 
 ```shell
-docker compose run --rm --no-deps --build backend python -m backend.app.ingestion.cli ingest --source-dir /app/data/source --dry-run --report-output /app/data/processed/dry-run-report.json
+docker compose exec backend uv run --frozen python evals/run_retrieval.py --cases evals/real_corpus_cases.json --output /app/data/processed/retrieval-evaluation-report.json
 ```
 
-The report contains a checksum-bound page coverage contract for every document, including page
-lists for indexed Markdown, indexed fallback, reviewed blank/decorative exclusions, quarantined
-visual exclusions, approved manual transcriptions, and failed mappings. Inspect coverage with:
+The ten-case live harness is also manual, requires explicit consent, never retries `POST /chat`, and stores a sanitized report:
 
 ```shell
-python -m json.tool data/processed/dry-run-report.json
+docker compose exec backend uv run --frozen python scripts/live_evaluation.py --allow-paid-calls --output /app/data/processed/live-evaluation-report.json
 ```
 
-A percentage below 100 means some authoritative PDF pages were intentionally excluded or failed;
-it does not mean their information is absent from the PDF. Raw OCR under
-`data/processed/page-review/` is explicitly rejected as an ingestion source.
+Vertex connectivity alone can be checked with the billable `make verify-vertex` command.
 
-Run real ingestion after reviewing the report and estimated embedding requests:
+## API and traces
 
 ```shell
-docker compose run --rm --build backend python -m backend.app.ingestion.cli ingest --source-dir /app/data/source --report-output /app/data/processed/ingestion-report.json
+curl -sS -X POST http://localhost:8000/sessions
+curl -sS -X POST http://localhost:8000/chat -H 'content-type: application/json' -d '{"session_id":"SESSION_ID","message":"What was Karnataka’s literacy rate in 2011?"}'
+curl -sS http://localhost:8000/runs/TRACE_ID/trace
 ```
 
-Ingestion is idempotent for unchanged PDF checksums and ingestion versions. Rebuilding an incompatible collection is intentionally explicit and destructive to that collection only:
+Trace IDs are allocated at request start and remain retrievable for typed failures. UI “Execution details” shows allowlisted operational fields only. Files under `workspace/` are ignored local state.
 
-```shell
-docker compose run --rm --build backend python -m backend.app.ingestion.cli ingest --source-dir /app/data/source --rebuild --report-output /app/data/processed/rebuild-report.json
-```
+## Troubleshooting
 
-## Offline OCR review
+- `port is already allocated`: stop the other process/container using 6333. Do not remove the Qdrant volume.
+- `pytest: executable file not found`: run `uv run --frozen pytest -q`; dev tools are not directly on the production image `PATH`.
+- `Unknown session`: call `POST /sessions`, then pass its returned ID in valid JSON.
+- UI stays pending: rebuild frontend/backend and inspect their logs; `POST /chat` is intentionally not retried.
+- Backend unhealthy: verify ADC mount, project/location/model values, Qdrant, and executor heartbeat.
 
-The page-review OCR utility uses Debian's pinned Tesseract 5 package and Pillow
-inside a dedicated Docker service. The service has networking disabled, receives
-no Google credentials, and is not connected to the ingestion workflow or Qdrant.
-It processes only the explicitly approved Karnataka pages and preserves raw output
-one PDF page per text file:
+Known limitations: excluded visual-page content, no token streaming, no URL-based browser session restoration, synchronous administrative ingestion, local Qdrant ports without TLS/auth, and development-grade executor isolation. See [DESIGN.md](DESIGN.md) and [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md).
 
-```bash
-docker compose run --rm --build ocr-review
-```
-
-Results are written under `data/processed/page-review/`. OCR from charts and maps
-is review material only: label/value and label/legend relationships must be
-checked manually against the authoritative PDF page before any later integration.
-
-Human-reviewed recovery records belong under `data/manifests/manual-transcriptions/`. A record must
-contain `document_id`, one-based `page_number`, non-empty `transcription`, optional
-`structured_values`, a human `reviewer`, timezone-aware `reviewed_at`, `source_checksum`,
-`verification_notes`, and `status: "approved"`. Approval is accepted only while the checksum matches
-the authoritative PDF.
-
-### Retrieval
-
-The development API performs Qdrant RRF hybrid search over Gemini dense and local BM25 sparse vectors:
-
-```shell
-curl -X POST http://localhost:8000/retrieval/search \
-  -H 'content-type: application/json' \
-  -d '{"query":"population of Mysuru","regions":["Karnataka"],"top_k":5,"debug":true}'
-```
-
-Administrative ingestion currently runs synchronously. This keeps take-home deployment simple, but a production service should enqueue ingestion so long PDF extraction and embedding jobs do not occupy an API worker.
-
-The checked-in, manually source-verified retrieval cases are in
-`evals/real_corpus_cases.json`. Run the live dense + sparse + Qdrant RRF evaluation without
-generating answers:
-
-```shell
-docker compose run --rm --no-deps backend uv run --frozen python evals/run_retrieval.py --cases evals/real_corpus_cases.json --output /app/data/processed/retrieval-evaluation-report.json
-```
-
-Recall@5 and Recall@10 are target-page recall across answerable gold targets. MRR uses the first
-matching document/page rank per answerable case. Citation-page accuracy verifies positive page
-provenance and the exact citation-substring invariant for every returned result. Filter accuracy
-requires every result to obey its requested document or region filter.
-
-Audit every stored point, payload, and named vector without changing Qdrant:
-
-```shell
-docker compose run --rm --no-deps backend uv run --frozen python -m backend.app.retrieval.validation \
-  --expected-points 2058 \
-  --output /app/data/processed/qdrant-validation-report.json
-```
-
-Inspect a single hybrid query and all three diagnostic rankings:
-
-```shell
-docker compose run --rm --no-deps backend uv run --frozen python -m backend.app.retrieval.cli search --query "What was the literacy rate in Karnataka?" --top-k 5 --debug
-```
-
-An unchanged ingestion is skipped before dense or sparse embedding and before any Qdrant upsert.
-The ingestion report exposes embedding-request, sparse-embedding, upsert-operation, and upserted-point
-counters so a zero-work rerun is auditable.
-
-## Conversational agent API
-
-Start the persistent API and its existing Qdrant dependency:
-
-```shell
-docker compose up -d --build qdrant backend
-```
-
-Create a session, retaining the returned `session_id`:
-
-```shell
-curl -X POST http://localhost:8000/sessions
-```
-
-Send a turn using that validated session ID:
-
-```shell
-curl -X POST http://localhost:8000/chat \
-  -H 'content-type: application/json' \
-  -d '{"session_id":"SESSION_ID","message":"What was the literacy rate in Karnataka in 2011?"}'
-```
-
-The response `trace_id` identifies its safe structured trace:
-
-```shell
-curl http://localhost:8000/runs/TRACE_ID/trace
-```
-
-Check session metadata with `GET /sessions/{session_id}`. Checkpoints persist in
-`workspace/checkpoints.sqlite`; run traces persist under
-`workspace/sessions/{session_id}/traces/{run_id}.json`. Neither contains credentials or vectors.
-New checkpoints carry schema version 4 and store application state as JSON-safe primitives,
-including a bounded history of validated claim metadata. Pre-v3 successful traces are migrated
-without treating assistant prose as evidence.
-
-Replay the saved Prompt 4F comparison without Gemini and without Qdrant writes:
-
-```shell
-docker compose run --rm --no-deps backend uv run --frozen python scripts/replay_turn2.py \
-  --trace /app/workspace/sessions/25f5f5982d0645d19ee909be14fa9a84/traces/30e4237c-b44d-4703-aaae-93fb9bcbab71.json \
-  --qdrant-url http://qdrant:6333 \
-  --collection census_documents \
-  --output /app/data/processed/agent-turn2-offline-replay.json
-```
-
-The four-turn live smoke test is deliberately manual because it invokes paid Vertex Gemini calls:
-
-```shell
-docker compose exec backend uv run --frozen python scripts/smoke_agent_memory.py \
-  --base-url http://localhost:8000
-```
-
-Replay the source-page follow-up from current Qdrant points without Gemini, embeddings, or writes:
-
-```shell
-docker compose run --rm --no-deps backend uv run --frozen python scripts/replay_turn3.py \
-  --session-id 98194e7f49d4468f823359f020522028 \
-  --output /app/data/processed/agent-turn3-offline-replay.json
-```
-
-After Turns 1 and 2 pass, resume that session at Turn 3 without repeating the paid turns:
-
-```shell
-docker compose exec backend uv run --frozen python scripts/smoke_agent_memory.py \
-  --base-url http://localhost:8000 --session-id SESSION_ID --start-turn 3
-```
-
-Agent requests have a configurable overall deadline (`AGENT_REQUEST_TIMEOUT_SECONDS`, default 180)
-and a per-provider-call budget (`AGENT_PROVIDER_TIMEOUT_SECONDS`, default 60). The application
-defaults to no timeout retry so one provider attempt receives the complete call budget; SDK retries
-are also disabled so deadlines do not stack. Comparison assessment input is bounded by
-`AGENT_ASSESSMENT_MAX_CHARACTERS` (default 12000) and `AGENT_ASSESSMENT_MAX_CHUNKS` (default 12),
-while retaining complete chunks from both regions. Evidence-assessment timeouts return HTTP 504
-with a retryable error and persisted trace ID.
-A failed turn is not advanced as the session's successful checkpoint. Retry by sending the same
-user message once after inspecting the failed trace; the failed attempt is not duplicated in model
-conversation context.
-
-Runtime Markdown skills are read only from `skills/`. Summary and inconsistency skills guide the
-agent. Chart and table skills guide task-specific Python generation after a citation-safe dataset is
-validated.
-
-## Isolated chart and table artifacts
-
-The backend submits typed JSON jobs atomically under `workspace/execution-queue/`. A dedicated
-non-root executor claims jobs by rename, validates generated Python's AST, runs it with process and
-output limits, validates every declared output, and returns a typed result through the same queue.
-The executor has no network, host port, Docker socket, ADC mount, Google environment variables,
-Qdrant connection, or access to session directories. Its root filesystem is read-only; only `/tmp`
-and the narrowly scoped queue are writable.
-
-Accepted artifacts are moved into:
+## Repository layout
 
 ```text
-workspace/sessions/{session_id}/artifacts/{artifact_id}/
-├── artifact.json
-├── generated.py
-├── input.json
-├── execution-result.json
-├── source-manifest.json
-└── chart.png / plotted-data.csv / table.csv / table.md
+backend/app/       FastAPI, ingestion, retrieval, LangGraph, lineage
+backend/tests/     Unit and integration tests
+frontend/          Streamlit client, models, renderers, tests
+executor/          Isolated worker and code policy
+skills/            Runtime Markdown skills
+data/manifests/    Pairing and reviewed coverage decisions
+data/source/       Locally supplied corpus (ignored)
+evals/             Evaluation cases and retrieval evaluator
+scripts/           Checks, replays, initialization, live harness
+workspace/         Ignored checkpoints, traces, queue, artifacts
+docs/              Decisions and reviewer preparation
 ```
 
-Generated code remains locally inspectable but is never served by the public API. List and download
-validated artifacts with:
-
-```shell
-curl http://localhost:8000/sessions/SESSION_ID/artifacts
-curl http://localhost:8000/sessions/SESSION_ID/artifacts/ARTIFACT_ID
-curl -OJ http://localhost:8000/sessions/SESSION_ID/artifacts/ARTIFACT_ID/files/table.csv
-curl http://localhost:8000/health/executor
-```
-
-Build and run the offline executor tests without Gemini:
-
-```shell
-docker compose build executor
-docker compose run --rm --no-deps executor python scripts/verify_executor_runtime.py
-docker compose up -d executor
-docker compose run --rm --no-deps backend uv run --frozen python scripts/smoke_executor_handoff.py
-```
-
-Replay the Prompt 5 comparison-packing failure and execute its synthetic approved dataset entirely
-offline. The fixture preserves the failed ten-candidate ordering but contains no production Census
-values:
-
-```shell
-docker compose build executor
-docker compose run --rm --no-deps executor python scripts/replay_artifact_failure.py
-```
-
-Gemini receives only a small semantic `ArtifactDatasetProposal`; authoritative chart/table identity
-is omitted and comes from the validated application requirement. Gemini never receives the strict
-internal dataset, source manifest, checksums, paths, or execution protocol. Inspect the deterministic
-schema-complexity guard with:
-
-```shell
-uv run --frozen python scripts/report_artifact_schema.py \
-  --output docs/artifact-schema-complexity.json
-```
-
-After starting Qdrant, the backend, and executor, replay trusted existing comparison evidence
-through proposal hydration and the isolated executor without Gemini, embeddings, or Qdrant writes:
-
-```shell
-docker compose run --rm --no-deps backend uv run --frozen python \
-  scripts/replay_artifact_proposal.py \
-  --session-id 98194e7f49d4468f823359f020522028 \
-  --trace-id 0a4cdb00-c807-47a0-8635-648f1bdf5147 \
-  --output data/processed/artifact-proposal-offline-replay.json
-```
-
-For multi-region artifacts, the backend performs one region-filtered data search per target. It
-reserves direct, value-bearing evidence for each target within the existing assessment budget before
-adding supporting candidates. Generic excluded-visual limitations are shown only when an excluded
-page is material to the requested data; safe indexed statewide tables take precedence.
-
-Container isolation and AST filtering reduce risk but are not a hardened multi-tenant sandbox.
-Resource controls vary by Docker host, AST policy cannot prove program intent, and a production
-multi-tenant deployment should use stronger per-job isolation such as microVMs or a dedicated
-sandbox runtime.
+Continue with [DESIGN.md](DESIGN.md), [docs/INTERVIEW_NOTES.md](docs/INTERVIEW_NOTES.md), [docs/VIDEO_SCRIPT.md](docs/VIDEO_SCRIPT.md), and [docs/SUBMISSION_CHECKLIST.md](docs/SUBMISSION_CHECKLIST.md).

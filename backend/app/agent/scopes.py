@@ -9,6 +9,8 @@ _METRIC_ALIASES = {
     "literacy rates": "literacy rate",
     "effective literacy rate": "literacy rate",
     "effective literacy rates": "literacy rate",
+    "gender ratio": "sex ratio",
+    "gender ratios": "sex ratio",
 }
 
 

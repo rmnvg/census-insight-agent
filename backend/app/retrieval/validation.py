@@ -1,7 +1,7 @@
 import argparse
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient, models
@@ -22,6 +22,9 @@ class CollectionValidationReport(BaseModel):
     non_empty_sparse_vectors: int
     excluded_pages_indexed: int
     unverified_ocr_points: int
+    dense_query_results: int = 0
+    sparse_query_results: int = 0
+    client_server_compatible: bool = False
     invalid_by_field: dict[str, int] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
 
@@ -71,6 +74,8 @@ def validate_collection(
 
     point_ids: set[str] = set()
     chunk_ids: set[str] = set()
+    sample_dense: list[float] | None = None
+    sample_sparse: models.SparseVector | None = None
     offset: Any = None
     while True:
         points, offset = client.scroll(
@@ -138,12 +143,18 @@ def validate_collection(
             vectors = point.vector
             dense = vectors.get("dense") if isinstance(vectors, dict) else None
             sparse = vectors.get("sparse") if isinstance(vectors, dict) else None
-            if isinstance(dense, list) and len(dense) == dense_dimensions:
+            if (
+                isinstance(dense, list)
+                and len(dense) == dense_dimensions
+                and all(isinstance(value, (float, int)) for value in dense)
+            ):
                 report.dense_vectors_768 += 1
+                sample_dense = sample_dense or cast(list[float], dense)
             else:
                 errors.append("missing or invalid dense vector")
             if isinstance(sparse, models.SparseVector) and sparse.indices and sparse.values:
                 report.non_empty_sparse_vectors += 1
+                sample_sparse = sample_sparse or sparse
             else:
                 errors.append("missing or empty sparse vector")
             if errors:
@@ -160,6 +171,37 @@ def validate_collection(
         report.errors.append(
             f"scanned point count {report.scanned_points} != exact count {exact_points}"
         )
+    if sample_dense is not None and sample_sparse is not None:
+        try:
+            report.dense_query_results = len(
+                client.query_points(
+                    collection_name=collection,
+                    query=sample_dense,
+                    using="dense",
+                    limit=1,
+                    with_payload=False,
+                    with_vectors=False,
+                ).points
+            )
+            report.sparse_query_results = len(
+                client.query_points(
+                    collection_name=collection,
+                    query=sample_sparse,
+                    using="sparse",
+                    limit=1,
+                    with_payload=False,
+                    with_vectors=False,
+                ).points
+            )
+            report.client_server_compatible = bool(
+                report.dense_query_results and report.sparse_query_results
+            )
+            if not report.client_server_compatible:
+                report.errors.append("read-only dense or sparse compatibility query was empty")
+        except Exception as error:
+            report.errors.append(
+                f"read-only client/server compatibility query failed: {type(error).__name__}"
+            )
     return report
 
 

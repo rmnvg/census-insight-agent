@@ -1,5 +1,6 @@
 import re
 from decimal import Decimal, InvalidOperation
+from typing import cast
 
 from backend.app.agent.models import ArtifactDataRequirement
 from backend.app.execution.contracts import (
@@ -148,8 +149,11 @@ def _match_row(
     proposal: ArtifactRowProposal,
     evidence: RetrievedEvidence,
     requirement: ArtifactDataRequirement,
+    *,
+    require_region_label: bool = True,
+    require_population_scope: bool = True,
 ) -> tuple[str, str]:
-    if _fold(proposal.label) != _fold(evidence.region):
+    if require_region_label and _fold(proposal.label) != _fold(evidence.region):
         raise ProposalHydrationError("WRONG_REGION_ROW")
     if requirement.regions and not any(
         _fold(proposal.label) == _fold(region) for region in requirement.regions
@@ -160,8 +164,10 @@ def _match_row(
         str(proposal.year) if proposal.year is not None else None,
         "year",
     )
-    population = _same_scope(
-        requirement.population_scope, proposal.population_scope, "population_scope"
+    population = (
+        _same_scope(requirement.population_scope, proposal.population_scope, "population_scope")
+        if require_population_scope
+        else None
     )
     residence = _same_scope(
         requirement.residence_scope, proposal.residence_scope, "residence_scope"
@@ -213,15 +219,16 @@ def _match_row(
                 continue
             if _fold(residence) not in _fold(header):
                 continue
-            population_categories = {"persons", "person", "male", "female"}
-            category_headers = header_words & population_categories
-            required_categories = _words(population) & population_categories
-            if category_headers and not required_categories <= category_headers:
-                continue
-            if required_categories and not required_categories <= _words(context):
-                continue
-            if not required_categories and _fold(population) not in _fold(context):
-                continue
+            if require_population_scope:
+                population_categories = {"persons", "person", "male", "female"}
+                category_headers = header_words & population_categories
+                required_categories = _words(cast(str, population)) & population_categories
+                if category_headers and not required_categories <= category_headers:
+                    continue
+                if required_categories and not required_categories <= _words(context):
+                    continue
+                if not required_categories and _fold(cast(str, population)) not in _fold(context):
+                    continue
             if proposal.series and _fold(proposal.series) not in _fold(header):
                 continue
             if not _unit_supported(proposal.unit, header, context):
@@ -241,17 +248,76 @@ def _match_row(
     return matches[0]
 
 
+_HEADER_LABELS = {
+    "state/district",
+    "district",
+    "state",
+    "state/uts",
+    "code",
+    "state/district code",
+    "total",
+    "rural",
+    "urban",
+}
+
+
+def count_table_entity_rows(evidence: list[RetrievedEvidence]) -> int:
+    """Best-effort, deterministic count of distinct table-row entities across evidence.
+
+    Used only as a safety net against a model proposal that silently omits rows from a
+    full-table ranking request: a repeated header line, a leading code/serial column, and the
+    state/UT aggregate row must not inflate this count, so all three are filtered before
+    counting distinct entity-name labels. This is a heuristic lower bound, not an exact parser;
+    it does not need to match a proposal's row count exactly, only catch a materially incomplete
+    one.
+    """
+    labels: set[str] = set()
+    for item in evidence:
+        state_row = item.region.strip().casefold()
+        for line in item.text.splitlines():
+            if line.count("|") < 2:
+                continue
+            cells = _table_cells(line)
+            if _is_separator(cells) or _is_column_numbers(cells):
+                continue
+            label = next(
+                (
+                    plain
+                    for cell in cells
+                    if (plain := _plain(cell)) and not plain.replace(".", "", 1).isdigit()
+                ),
+                "",
+            )
+            folded = label.casefold()
+            if not folded or folded in _HEADER_LABELS or (state_row and folded == state_row):
+                continue
+            labels.add(folded)
+    return len(labels)
+
+
 def hydrate_artifact_dataset(
     proposal: ArtifactDatasetProposal,
     requirement: ArtifactDataRequirement,
     evidence: list[RetrievedEvidence],
     requested_output: str,
 ) -> ArtifactDataset:
-    """Create the strict internal dataset using only application-owned provenance."""
+    """Create the strict internal dataset using only application-owned provenance.
+
+    A ranking (`requirement.rank_all`) proposal names sub-document entities (e.g. districts)
+    whose label never equals the document's own `region` field, unlike an ordinary comparison
+    row; `require_region_label` is relaxed only in that case. The row is still only accepted
+    when it is found verbatim as a labeled cell in a trusted table row (see `_match_row`).
+    """
     validate_trusted_artifact_evidence(evidence)
     expected_type = requirement.artifact_type
     if not proposal.rows:
         raise ProposalHydrationError("EMPTY_PROPOSAL")
+    skip_population_match = requirement.rank_all and requirement.population_scope is None
+    if skip_population_match:
+        # Metrics like sex ratio have no population-category column to verify against; default
+        # the stored metadata to the documented "persons" convention without requiring the word
+        # to appear in the trusted table text.
+        requirement = requirement.model_copy(update={"population_scope": "persons"})
     by_id = {item.chunk_id: item for item in evidence}
     rows: list[dict[str, object]] = []
     sources: list[SourceRecord] = []
@@ -271,7 +337,13 @@ def hydrate_artifact_dataset(
         if identity in seen:
             raise ProposalHydrationError("DUPLICATE_PROPOSAL_ROW")
         seen.add(identity)
-        raw_value, quote = _match_row(row, item, requirement)
+        raw_value, quote = _match_row(
+            row,
+            item,
+            requirement,
+            require_region_label=not requirement.rank_all,
+            require_population_scope=not skip_population_match,
+        )
         row_id = f"row-{index}"
         rows.append(
             {

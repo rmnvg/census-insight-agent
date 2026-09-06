@@ -187,9 +187,14 @@ class FakeModel:
         return "Open user referent only; no source facts retained."
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, evidence: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        evidence: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
-        del query, task_type, evidence
+        del query, task_type, evidence, rank_all
         raise AssertionError("Artifact dataset generation was not expected")
 
     async def generate_artifact_code(

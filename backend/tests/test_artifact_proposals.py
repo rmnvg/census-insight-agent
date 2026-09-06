@@ -283,9 +283,14 @@ class CountingProposalModel:
         self.calls = 0
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, values: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        values: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
-        del query, task_type, values
+        del query, task_type, values, rank_all
         self.calls += 1
         return proposal()
 
@@ -413,9 +418,14 @@ class ArtifactProviderFailureModel(FakeModel):
         return ResolvedQuery(query=query)
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, values: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        values: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
-        del query, task_type, values
+        del query, task_type, values, rank_all
         raise self.error
 
 
@@ -424,9 +434,14 @@ class ArtifactHydrationFailureModel(ArtifactProviderFailureModel):
         FakeModel.__init__(self)
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, values: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        values: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
-        del query, task_type, values
+        del query, task_type, values, rank_all
         value = proposal()
         return value.model_copy(
             update={"rows": [value.rows[0].model_copy(update={"evidence_id": "unknown-evidence"})]}
@@ -445,9 +460,14 @@ class CountingArtifactModel(ArtifactProviderFailureModel):
         self.proposal_calls = 0
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, values: list[RetrievedEvidence]
+        self,
+        query: str,
+        task_type: str,
+        values: list[RetrievedEvidence],
+        *,
+        rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
-        del query, task_type, values
+        del query, task_type, values, rank_all
         self.proposal_calls += 1
         return proposal()
 

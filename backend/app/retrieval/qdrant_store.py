@@ -85,7 +85,7 @@ class QdrantStore:
         sparse = sparse_vectors.get(self.SPARSE_VECTOR)
         if sparse is None or sparse.modifier != models.Modifier.IDF:
             raise CollectionSchemaError("Qdrant collection is missing IDF-modified sparse vector")
-        metadata = info.config.metadata or {}
+        metadata = getattr(info.config, "metadata", None) or {}
         expected = {
             "dense_model": self.dense_model,
             "dense_dimensions": self.dense_dimensions,

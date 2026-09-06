@@ -16,6 +16,12 @@ from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
 
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _words(value: str) -> set[str]:
+    return set(_WORD.findall(value.casefold()))
+
 
 class SearchDocumentsInput(BaseModel):
     query: str = Field(min_length=1)
@@ -169,6 +175,51 @@ class AgentTools:
             if len(selected) >= max_sections:
                 break
         return selected
+
+    async def collect_metric_table_rows(
+        self, document_id: str, metric: str
+    ) -> list[RetrievedEvidence]:
+        """Scan every chunk of a document for the full table backing a ranking request.
+
+        Unlike search_documents, this never truncates to a top-k semantic ranking: a "which
+        district had the highest X" question needs every row of the matching table, not the
+        chunks that best embed near the query text.
+        """
+        metric_words = _words(metric)
+        records: list[Any] = []
+        offset: Any = None
+        while True:
+            page, offset = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.client.scroll,
+                    self.store.collection_name,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="document_id", match=models.MatchValue(value=document_id)
+                            )
+                        ]
+                    ),
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                ),
+                timeout=self.timeout_seconds,
+            )
+            records.extend(page)
+            if offset is None:
+                break
+        matched: list[RetrievedEvidence] = []
+        for record in records:
+            payload = record.payload or {}
+            section = " ".join(str(value) for value in payload.get("section_path", []))
+            context = f"{section} {str(payload.get('text', ''))[:400]}"
+            if metric_words and metric_words <= _words(context):
+                matched.append(
+                    RetrievedEvidence.model_validate({**payload, "retrieval_score": 0.0})
+                )
+        return sorted(matched, key=lambda item: item.page_number)
 
     async def expand_candidate_pages(
         self, candidates: list[RetrievedEvidence], *, max_pages_per_document: int = 3

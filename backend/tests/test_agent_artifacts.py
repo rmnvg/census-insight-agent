@@ -53,9 +53,9 @@ class ArtifactModel:
         self.repairs = 0
 
     async def propose_artifact_dataset(
-        self, query: str, task_type: str, values: list[Any]
+        self, query: str, task_type: str, values: list[Any], *, rank_all: bool = False
     ) -> ArtifactDatasetProposal:
-        del query, task_type, values
+        del query, task_type, values, rank_all
         return ArtifactDatasetProposal(
             title="Literacy",
             chart_kind=None,

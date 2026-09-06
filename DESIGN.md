@@ -1,6 +1,38 @@
 # Design
 
-The detailed ingestion, retrieval, and orchestration design is deferred. The binding initial decisions are recorded in [docs/DECISIONS.md](docs/DECISIONS.md).
+The binding platform decisions are summarized in [docs/DECISIONS.md](docs/DECISIONS.md). This document records the implemented trust boundaries and tradeoffs.
+
+## System architecture
+
+```mermaid
+flowchart LR
+  subgraph Presentation
+    User --> Streamlit
+  end
+  subgraph Orchestration
+    Streamlit --> FastAPI
+    FastAPI --> LangGraph
+    LangGraph --> Gemini[Vertex Gemini / ADC]
+    LangGraph --> Skills[Runtime skills]
+    LangGraph --> SQLite[Async SQLite checkpoint]
+  end
+  subgraph Evidence
+    LangGraph --> Hybrid[Balanced hybrid retrieval]
+    Hybrid --> Dense[Vertex dense query]
+    Hybrid --> Sparse[Local BM25 query]
+    Dense --> Qdrant
+    Sparse --> Qdrant
+    Qdrant --> RRF[RRF-ranked evidence]
+  end
+  subgraph Isolated_execution
+    LangGraph --> Queue[Filesystem queue]
+    Queue --> Executor[No-network executor]
+    Executor --> Outputs[Validated PNG / CSV / Markdown / JSON]
+    Outputs --> FastAPI
+  end
+```
+
+Credentials and source evidence stay behind the backend boundary. The presentation plane cannot access Qdrant or runtime files. The execution plane receives a checksum-bound dataset but no credentials, network, source corpus, checkpoints, or Docker socket.
 
 ## Streamlit UI boundary
 
@@ -118,6 +150,25 @@ nearest neighbour. A later agent must validate claims against exact evidence and
 coverage limitations before answering or refusing.
 
 ## Citation-grounded conversational graph
+
+```mermaid
+flowchart TD
+  A[Create run and resolve context] --> B[Classify task]
+  B --> C[Discover and load runtime skill]
+  C --> D[Retrieve per target]
+  D --> E[Balance and bound evidence]
+  E --> F[Assess evidence]
+  F -->|insufficient| G[Grounded refusal / limitation]
+  F -->|answer| H[Build claims and exact spans]
+  F -->|artifact| I[Minimal proposal]
+  I --> J[Deterministic hydration and lineage]
+  J --> K[Policy check and isolated execution]
+  K --> L[Validate and publish artifacts]
+  H --> M[Validate public response]
+  L --> M
+  G --> M
+  M --> N[Persist successful memory and sanitized trace]
+```
 
 ```mermaid
 flowchart LR
@@ -270,3 +321,69 @@ the executor is called.
 The executor uses Docker isolation as its primary boundary and AST filtering as defense in depth.
 This design reduces risk but is not equivalent to a hardened hostile multi-tenant sandbox: kernel,
 container-runtime, resource-accounting, and static-analysis limitations remain.
+
+## Ranking and superlative queries
+
+A question naming no specific target — "which district had the highest sex ratio in Madhya
+Pradesh?" — is classified as `artifact_table` with an empty `regions` list and
+`artifact_requirement.rank_all=true`/`rank_direction`. It deliberately reuses the existing
+artifact pipeline rather than adding a parallel task type: retrieval switches from per-target
+search to a full-document table scan (`collect_metric_table_rows`), evidence assessment becomes
+deterministic (a full-table scan needs no per-target LLM relevance judgment), and the same
+propose → deterministically hydrate → validate → generate code → execute → validate lineage
+sequence used by every other chart/table request applies unchanged.
+
+Two aspects are deliberately **not** delegated to generated code. First, *who wins* is computed by
+the application directly from the validated, cited dataset (`prepare_artifact` sorts
+`dataset.rows` and takes the extreme value), the same "application owns the arithmetic" posture
+already used for comparison differences — generated code never gets to assert the factual answer.
+Second, a state/UT aggregate row (e.g. "Madhya Pradesh" itself, present in the same table as its
+districts) is excluded from winning: its label is checked against the document's own region before
+a claim is built, so a ranking question about districts can never resolve to the state total.
+The isolated executor still does real work — it runs model-generated code that reads the same
+trusted, pre-sorted dataset and renders the downloadable ranked table, going through the identical
+AST-policy, timeout, stdout/stderr-capture, and one-repair-then-refuse path as any other artifact.
+
+A model proposal that silently omits rows (e.g. proposing 12 of 50 districts) would make the
+deterministic winner computation correct-looking but wrong. `count_table_entity_rows` in
+`backend/app/execution/hydration.py` independently counts distinct entity labels in the same
+trusted evidence — excluding repeated table headers and the state aggregate row — and
+`prepare_artifact` refuses (`MODEL_OUTPUT_INVALID` / `RANKING_COVERAGE_INCOMPLETE`) rather than
+silently ranking over a partial table when the proposal covers fewer rows than it detects. This is
+a heuristic lower bound on row count, not an exact parser, but it is a real, tested gate rather
+than an assumption that the model enumerated every row.
+
+Ordinary per-region comparisons match a proposed row's label against the trusted chunk's own
+`region` field, because that field is document-scoped (one value per state report). Ranking rows
+name sub-document entities — districts — whose names never equal that field, so
+`hydrate_artifact_dataset`/`_match_row` accept `require_region_label=False` for `rank_all`
+requests; the row is still only accepted when its label and value are found together, verbatim, in
+a real table row of the trusted evidence. Similarly, a metric like sex ratio has no
+male/female/persons column to verify (it is inherently a cross-sex ratio, not sliced by
+population category), so `require_population_scope` is relaxed only when the classifier legitimately
+left `population_scope` unset for a ranking request; a ranking request that does specify a category
+("highest female literacy rate") still has it fully verified against the table, unchanged from
+ordinary chart/table requests.
+
+## Tradeoffs, alternatives, and intentionally skipped work
+
+Qdrant was selected as the single vector database because named dense/sparse vectors, payload filters, and server-side RRF keep one provenance-aware retrieval boundary. A relational vector extension would reduce services but would require recreating hybrid-ranking and payload contracts. Vertex Gemini keeps model traffic within GCP and ADC; the tradeoff is cloud configuration and paid live evaluation. LangGraph makes node transitions, retries, checkpointing, and failed-run traces explicit at the cost of more typed state conversion than a linear chain.
+
+Vertex AI/ADC was kept even though the brief specifically named Groq, Nebius, and NVIDIA-style
+free-credit providers and asked for a system that is "quick to set up and run end-to-end" on a
+reviewer's own machine. The tradeoff was made deliberately, not overlooked: ADC gives project-scoped
+Google Cloud identity without distributing an API key (see "Vertex AI and ADC" above), which was
+judged worth more than setup speed for this submission. The honest cost is real and is not hidden
+elsewhere in this document — a reviewer needs a GCP project with Vertex AI enabled, must run
+`gcloud auth application-default login`, and must explicitly opt into one billable step
+(`scripts/initialize_corpus.py --allow-paid-calls`) before the system can answer a single question.
+That is materially slower to stand up than pasting a free API key into `.env`, and it is the biggest
+deviation from the brief's own stated requirements in this submission. With more time, the correct
+fix is not a larger executor or retrieval change but a provider swap: move chat/tool-calling to an
+OpenAI-compatible free-credit provider (Groq, Nebius, or NVIDIA NIM all support tool calling) and
+move dense embeddings to a local FastEmbed model — already a dependency for the sparse/BM25 side —
+removing the GCP dependency for retrieval entirely without touching Qdrant, RRF, or citation logic.
+
+Filesystem queueing is intentionally simple and observable for a single-host evaluation. A durable broker would improve horizontal scaling, leases, and backpressure but would add operational surface without strengthening source provenance. SQLite is suitable for short-term single-deployment memory, not multi-region concurrent persistence. Administrative ingestion remains synchronous and explicit; no background crawler, automatic source mutation, raw-OCR ingestion, hidden model fallback, or automatic destructive collection migration was built.
+
+With another day, the priorities would be microVM-grade executor isolation, URL-restorable UI sessions, streamed non-sensitive progress, a durable job broker, authenticated/TLS service edges, layout-aware visual extraction followed by human verification, and a licensed corpus distribution or snapshot workflow. None should weaken exact citation spans or the physical-page contract.

@@ -1,7 +1,7 @@
-from typing import cast
+from typing import Literal, cast
 
 from backend.app.agent.models import AgentResponse, AnswerClaim, Citation, ClaimUnit, EvidenceSpan
-from backend.app.execution.contracts import ArtifactDataset, ArtifactDescriptor
+from backend.app.execution.contracts import ArtifactDataset, ArtifactDescriptor, SourceRecord
 from backend.app.retrieval.models import RetrievedEvidence
 
 
@@ -10,6 +10,9 @@ def artifact_response(
     descriptor: ArtifactDescriptor,
     evidence: list[RetrievedEvidence],
     trace_id: str,
+    *,
+    ranking_winner: SourceRecord | None = None,
+    rank_direction: Literal["max", "min"] | None = None,
 ) -> AgentResponse:
     by_id = {item.chunk_id: item for item in evidence}
     citations: list[Citation] = []
@@ -64,8 +67,17 @@ def artifact_response(
                 unit="other",
             )
         )
+    lead = ""
+    if ranking_winner is not None:
+        direction_word = "lowest" if rank_direction == "min" else "highest"
+        unit_suffix = f" {ranking_winner.unit}" if ranking_winner.unit else ""
+        metric = ranking_winner.metric or "value"
+        lead = (
+            f"{ranking_winner.region} recorded the {direction_word} {metric} "
+            f"({ranking_winner.raw_value}{unit_suffix}) among {dataset.title}. "
+        )
     return AgentResponse(
-        answer_markdown=f"Created {dataset.title}. Download: {descriptor.download_url}",
+        answer_markdown=f"{lead}Created {dataset.title}. Download: {descriptor.download_url}",
         claims=claims,
         citations=citations,
         artifacts=[descriptor],

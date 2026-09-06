@@ -10,6 +10,7 @@ from backend.app.execution.contracts import (
     ArtifactDescriptor,
     ExecutionRequest,
     ExecutionResult,
+    SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
 
@@ -36,6 +37,8 @@ class ArtifactDataRequirement(BaseModel):
     population_scope: str | None = None
     residence_scope: str | None = None
     comparison: bool = False
+    rank_all: bool = False
+    rank_direction: Literal["max", "min"] | None = None
 
 
 class TaskClassification(BaseModel):
@@ -321,6 +324,7 @@ class AgentState(TypedDict, total=False):
     conversation_summary: str
     calculations: list[CalculationResult]
     artifact_dataset: ArtifactDataset | None
+    ranking_winner: SourceRecord | None
     generated_code: str | None
     execution_request: ExecutionRequest | None
     execution_result: ExecutionResult | None

@@ -1,5 +1,43 @@
 # Failure Analysis
 
+## Case summaries
+
+### Unsafe chart/map OCR — mitigated
+
+- **Input:** Twelve image-only Karnataka chart and thematic-map pages.
+- **Observed behavior:** Tesseract returned words and high token confidence but detached labels, legends, regions, and values.
+- **Root cause:** Plain OCR discards two-dimensional visual relationships; token confidence measures recognition, not semantic association.
+- **Safety impact:** Ingestion could cite a real page while asserting the wrong district/value or chart-category/percentage pair.
+- **Current mitigation:** Raw OCR is quarantined, all pages are `excluded_unverified_visual`, and independent chunk/embed/upload guards reject it.
+- **Proposed future fix:** Human-approved checksum-bound transcription, or layout-aware multimodal extraction followed by human verification.
+
+### Global comparison budget dropped Odisha evidence — fixed
+
+- **Input:** A Karnataka/Odisha literacy chart request.
+- **Observed behavior:** Valid Odisha statewide evidence ranked tenth but was omitted from a globally packed 12,000-character assessment context.
+- **Root cause:** Earlier packing optimized rank globally and did not reserve capacity per requested region.
+- **Safety impact:** The system safely refused, but answerable comparisons and artifacts degraded asymmetrically.
+- **Current mitigation:** Target-filtered retrieval and balanced packing reserve one complete value-bearing candidate per region and fail explicitly if reservations cannot fit.
+- **Proposed future fix:** Evaluate learned per-target reranking only after preserving the deterministic minimum-evidence guarantee.
+
+### Streamlit rerun loop hid a completed answer — fixed
+
+- **Input:** A normal chat submission from the Streamlit UI.
+- **Observed behavior:** FastAPI completed successfully, while the UI remained pending and repeatedly triggered document/Qdrant log traffic.
+- **Root cause:** An unconditional post-submit rerun collided with the in-progress guard; sidebar coverage was recomputed on every rerun.
+- **Safety impact:** No answer was fabricated or duplicated, but the successful response was unavailable to the user and operational noise obscured diagnosis.
+- **Current mitigation:** Completion renders in the same run, duplicate guarded events return normally, and sidebar metadata is session-cached and manifest-backed.
+- **Proposed future fix:** Add streamed server progress and URL-restorable sessions without retrying ambiguous paid POST requests.
+
+### Ranking over an incomplete row proposal — mitigated
+
+- **Input:** A superlative question over an unbounded row set, e.g. "Which district had the highest sex ratio in Madhya Pradesh?", against a ~50-row Statement table.
+- **Observed risk:** The application computes the winning row deterministically from the model's proposed dataset rows, not from generated code. If the proposal silently omitted rows (e.g. 12 of 50 districts, all lower than the true maximum), the deterministic computation would still run and return a confident, citation-backed, but factually wrong "highest" answer — a plausible-looking wrong answer is worse than a refusal.
+- **Root cause:** Nothing previously verified that a model's row proposal was complete; `ArtifactDatasetProposal.rows` has no required cardinality relative to the source table.
+- **Safety impact:** Would have been the same failure class as the OCR case above — citing a real page while asserting an unverified fact — but for computed rankings instead of extracted values.
+- **Current mitigation:** `count_table_entity_rows` (`backend/app/execution/hydration.py`) independently counts distinct entity labels in the trusted evidence, excluding repeated headers and the state/UT aggregate row, and `prepare_artifact` refuses (`MODEL_OUTPUT_INVALID` / `RANKING_COVERAGE_INCOMPLETE`) when the hydrated dataset covers fewer rows than detected. A second, narrower guard (`RANKING_INCLUDES_AGGREGATE_ROW`) rejects the case where the winning row is the state total rather than an individual entity, since the aggregate row shares the same table and could otherwise win a "lowest" query. Both are covered by regression tests in `backend/tests/test_agent_ranking.py`.
+- **Proposed future fix:** The row-completeness check is a heuristic lower bound on distinct labels, not an exact table parser; a genuinely adversarial or malformed table could still evade it. A stronger fix would independently extract the full row set deterministically (not via the model at all) before ever calling the model for a proposal, removing the completeness question rather than detecting it after the fact.
+
 ## Streamlit boundary failures
 
 The first live UI request completed successfully in the backend but remained visually pending. A

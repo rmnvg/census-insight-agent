@@ -26,6 +26,7 @@ from backend.app.execution.contracts import (
     ArtifactDescriptor,
     ExecutionRequest,
     ExecutionResult,
+    SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
 
@@ -65,6 +66,7 @@ def hydrate_agent_state(raw: AgentState | dict[str, Any]) -> AgentState:
         "draft_answer": DraftAnswer,
         "final_response": AgentResponse,
         "artifact_dataset": ArtifactDataset,
+        "ranking_winner": SourceRecord,
         "execution_request": ExecutionRequest,
         "execution_result": ExecutionResult,
     }

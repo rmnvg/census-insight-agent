@@ -55,10 +55,11 @@ from backend.app.execution.client import (
     ExecutorUnavailableError,
     new_request,
 )
-from backend.app.execution.contracts import ExpectedArtifact, SourceManifest
+from backend.app.execution.contracts import ExpectedArtifact, SourceManifest, SourceRecord
 from backend.app.execution.hydration import (
     ProposalHydrationError,
     TrustedEvidenceProvenanceError,
+    count_table_entity_rows,
     hydrate_artifact_dataset,
     resolved_chart_kind,
     validate_trusted_artifact_evidence,
@@ -442,6 +443,21 @@ class AgentGraph:
                 }
             )
             return {"task_type": "clarification", "classification": classification}
+        requirement_hint = state.get("artifact_requirement") or classification.artifact_requirement
+        if (
+            task_type == "artifact_table"
+            and requirement_hint is not None
+            and requirement_hint.rank_all
+            and not classification.document_ids
+            and len(classification.regions) != 1
+        ):
+            classification = classification.model_copy(
+                update={
+                    "task_type": "clarification",
+                    "clarification_question": "Which Census report's districts should I rank?",
+                }
+            )
+            return {"task_type": "clarification", "classification": classification}
         artifact = task_type in {"artifact_chart", "artifact_table"}
         steps = ["retrieve citation-safe evidence", "validate evidence"]
         if artifact:
@@ -616,7 +632,35 @@ class AgentGraph:
             targets.extend(([document], None) for document in classification.document_ids)
         else:
             targets.append((classification.document_ids or None, classification.regions or None))
-        if state["task_type"] == "summary":
+        if artifact_requirement is not None and artifact_requirement.rank_all:
+            documents_result, listing = await self._recorded_tool(
+                {**state, "tool_calls": calls},
+                "list_documents",
+                {},
+                self.tools.list_documents,
+            )
+            calls.append(listing)
+            documents = cast(list[DocumentSummary], documents_result or [])
+            document_id = next(iter(classification.document_ids), None)
+            if document_id is None and classification.regions:
+                region = classification.regions[0]
+                document_id = next(
+                    (item.document_id for item in documents if item.region == region), None
+                )
+            if document_id is not None:
+                result, record = await self._recorded_tool(
+                    {**state, "tool_calls": calls},
+                    "collect_metric_table_rows",
+                    {"document_id": document_id, "metric": artifact_requirement.metric},
+                    partial(
+                        self.tools.collect_metric_table_rows,
+                        document_id,
+                        artifact_requirement.metric,
+                    ),
+                )
+                calls.append(record)
+                evidence.extend(cast(list[RetrievedEvidence], result or []))
+        elif state["task_type"] == "summary":
             documents_result, listing = await self._recorded_tool(
                 {**state, "tool_calls": calls},
                 "list_documents",
@@ -843,6 +887,35 @@ class AgentGraph:
                         candidate_count=len(evidence),
                         selected_evidence_ids=assessment.selected_evidence_ids,
                         assessment_method="deterministic_rehydration",
+                        explanation=assessment.explanation,
+                    ),
+                ],
+            }
+        rank_requirement = state.get("artifact_requirement")
+        if rank_requirement is not None and rank_requirement.rank_all:
+            sufficient = bool(evidence)
+            assessment = EvidenceAssessment(
+                selected_evidence_ids=[item.chunk_id for item in evidence] if sufficient else [],
+                sufficient=sufficient,
+                explanation=(
+                    "A full-table scan of the requested document returned candidate rows"
+                    if sufficient
+                    else "No matching table rows were found for the requested metric"
+                ),
+            )
+            return {
+                "evidence_assessment": assessment,
+                "selected_evidence": evidence if sufficient else [],
+                "evidence_sufficient": sufficient,
+                "trace_events": [
+                    *state.get("trace_events", []),
+                    self._event(
+                        "evidence_assessment",
+                        "assess_evidence",
+                        sufficient=sufficient,
+                        candidate_count=len(evidence),
+                        selected_evidence_ids=assessment.selected_evidence_ids,
+                        assessment_method="deterministic_full_table_scan",
                         explanation=assessment.explanation,
                     ),
                 ],
@@ -1186,7 +1259,10 @@ class AgentGraph:
         proposal = None
         try:
             proposal = await self.model.propose_artifact_dataset(
-                state["resolved_query"], state["task_type"], selected_evidence
+                state["resolved_query"],
+                state["task_type"],
+                selected_evidence,
+                rank_all=requirement.rank_all,
             )
             dataset = hydrate_artifact_dataset(
                 proposal,
@@ -1298,10 +1374,85 @@ class AgentGraph:
                     "executor_submitted": False,
                 },
             ) from error
+        ranking_winner: SourceRecord | None = None
+        if requirement.rank_all:
+            detected_rows = count_table_entity_rows(selected_evidence)
+            if detected_rows and len(dataset.rows) < detected_rows:
+                raise AgentOperationalError(
+                    code="MODEL_OUTPUT_INVALID",
+                    node="prepare_artifact",
+                    message=(
+                        "Artifact preparation failed because the proposed dataset covered fewer "
+                        "rows than the source table appears to contain."
+                    ),
+                    retryable=False,
+                    elapsed_seconds=None,
+                    configured_timeout_seconds=None,
+                    retry_count=0,
+                    diagnostics={
+                        "failure_stage": "ranking_row_completeness",
+                        "reason_code": "RANKING_COVERAGE_INCOMPLETE",
+                        "proposed_row_count": len(dataset.rows),
+                        "detected_row_count": detected_rows,
+                        "executor_submitted": False,
+                    },
+                )
+            reverse = requirement.rank_direction != "min"
+            sorted_rows = sorted(
+                dataset.rows, key=lambda row: cast(float, row["value"]), reverse=reverse
+            )
+            sorted_row_ids = [str(row["row_id"]) for row in sorted_rows]
+            sorted_sources = sorted(
+                dataset.source_records, key=lambda source: sorted_row_ids.index(source.row_id)
+            )
+            dataset = dataset.model_copy(
+                update={"rows": sorted_rows, "source_records": sorted_sources}
+            )
+            winner_row = sorted_rows[0]
+            state_region = selected_evidence[0].region if selected_evidence else None
+            if state_region and str(winner_row["label"]).casefold() == state_region.casefold():
+                raise AgentOperationalError(
+                    code="MODEL_OUTPUT_INVALID",
+                    node="prepare_artifact",
+                    message=(
+                        "Artifact preparation failed because the ranked row was the state/UT "
+                        "total rather than an individual entity."
+                    ),
+                    retryable=False,
+                    elapsed_seconds=None,
+                    configured_timeout_seconds=None,
+                    retry_count=0,
+                    diagnostics={
+                        "failure_stage": "ranking_aggregate_row_guard",
+                        "reason_code": "RANKING_INCLUDES_AGGREGATE_ROW",
+                        "winning_label": str(winner_row["label"]),
+                        "executor_submitted": False,
+                    },
+                )
+            ranking_winner = next(
+                source for source in dataset.source_records if source.row_id == winner_row["row_id"]
+            )
         return {
             "artifact_dataset": dataset,
+            "ranking_winner": ranking_winner,
             "trace_events": [
                 *state.get("trace_events", []),
+                *(
+                    [
+                        self._event(
+                            "ranking_winner_selected",
+                            "prepare_artifact",
+                            winning_row_id=ranking_winner.row_id,
+                            winning_label=ranking_winner.region,
+                            winning_value=ranking_winner.normalized_numeric_value,
+                            direction=requirement.rank_direction or "max",
+                            detected_row_count=detected_rows,
+                            proposed_row_count=len(dataset.rows),
+                        )
+                    ]
+                    if ranking_winner is not None
+                    else []
+                ),
                 self._event(
                     "model_invocation", "prepare_artifact", operation="artifact_dataset_proposal"
                 ),
@@ -1480,8 +1631,14 @@ class AgentGraph:
                 title=dataset.title,
                 primary_filename=primary,
             )
+            requirement = state.get("artifact_requirement")
             response = artifact_response(
-                dataset, descriptor, state.get("selected_evidence", []), state["run_id"]
+                dataset,
+                descriptor,
+                state.get("selected_evidence", []),
+                state["run_id"],
+                ranking_winner=state.get("ranking_winner"),
+                rank_direction=requirement.rank_direction if requirement else None,
             )
         except (ValueError, DatasetValidationError) as error:
             self.artifact_store.discard(request.job_id)
