@@ -2,6 +2,42 @@
 
 The detailed ingestion, retrieval, and orchestration design is deferred. The binding initial decisions are recorded in [docs/DECISIONS.md](docs/DECISIONS.md).
 
+## Streamlit UI boundary
+
+Streamlit provides a compact evaluator-facing chat and artifact interface while FastAPI remains the
+only application boundary. The frontend calls public HTTP endpoints and contains its own strict
+public-response models; it does not import backend agent, retrieval, or executor code. It has no
+Qdrant, checkpoint, execution-queue, artifact-workspace, Vertex, ADC, or Docker-socket access.
+
+Streamlit session state retains only display-ready turns, an in-progress flag, and the backend
+session ID. LangGraph checkpoints remain the authoritative conversation memory. Initial state
+creates one session, reruns reuse it, and “New conversation” creates a fresh backend session without
+deleting old checkpoints, artifacts, or traces. A request fingerprint and submission-in-progress
+guard prevent reruns from duplicating a turn. `POST /chat` is never retried: retrying an ambiguous
+timeout could duplicate a paid model request even if the backend completed successfully. Only safe
+GET health/metadata calls receive one bounded transport retry.
+
+Answers are not rewritten. Structured claims map deterministically to deduplicated citation cards
+that show an untouched evidence quote and physical PDF page. Snippets use safe Streamlit text/code
+components so Markdown HTML cannot execute. Derived claims retain every input citation.
+
+Artifacts are fetched by allowlisted public filenames only. The client checks filename, MIME type,
+byte limit, PNG signature, CSV parsing, and JSON manifest shape before rendering. It never resolves a
+filesystem path from API data. A failed artifact download preserves the successful answer and is
+reported separately.
+
+Trace input is tolerant of additive backend fields, but the rendered view is an explicit allowlist.
+Unknown keys are discarded; credentials, prompts, raw responses, vectors, paths, source chunks, and
+full checksums are never recursively displayed. Trace unavailability likewise cannot erase a valid
+answer.
+
+The frontend image runs as UID/GID 10002 with a read-only root, all Linux capabilities dropped,
+`no-new-privileges`, resource/PID bounds, and a small writable `/tmp`. It receives only the backend
+base URL and UI timeout/size settings. Streamlit was selected because its native chat, dataframe,
+image, download, and status components demonstrate the typed backend contracts with little browser
+code; a richer client could later add URL session restoration, streaming progress, and more durable
+local display history.
+
 ## Vertex AI and ADC
 
 Vertex AI with Application Default Credentials was selected instead of the Gemini Developer API and API keys. ADC provides project-scoped Google Cloud identity, works with local developer credentials and workload identities, and avoids distributing application secrets. The provider layer explicitly enables Vertex AI and never falls back to API-key authentication.

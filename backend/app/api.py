@@ -1,3 +1,4 @@
+import json
 import mimetypes
 from pathlib import Path
 
@@ -16,7 +17,14 @@ from backend.app.agent.models import (
 from backend.app.agent.service import AgentChatError, UnknownSessionError, get_agent_service
 from backend.app.config import get_settings
 from backend.app.execution.contracts import ArtifactDescriptor, ArtifactListing, ExecutorHealth
-from backend.app.ingestion.models import IngestionReport
+from backend.app.ingestion.models import (
+    CoverageLimitation,
+    DocumentCoverageReport,
+    DocumentCoverageSummary,
+    DocumentManifest,
+    DocumentPublicSummary,
+    IngestionReport,
+)
 from backend.app.ingestion.service import IngestionService
 from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.models import (
@@ -37,7 +45,77 @@ class ChatRequest(BaseModel):
     message: str
 
 
-@router.post("/sessions", response_model=SessionRecord, tags=["agent"])
+SESSION_EXAMPLE = {
+    "session_id": "6e594f6e52754ef5932df652638e3f0d",
+    "created_at": "2026-01-01T12:00:00Z",
+    "updated_at": "2026-01-01T12:00:00Z",
+}
+
+CHAT_SUCCESS_EXAMPLE = {
+    "answer": "Karnataka's literacy rate in 2011 was 75.36 percent.",
+    "claims": [
+        {
+            "claim_id": "claim-1",
+            "text": "Karnataka's literacy rate in 2011 was 75.36 percent.",
+            "citation_ids": ["citation-1"],
+            "document_derived": True,
+            "metric": "literacy rate",
+            "region": "Karnataka",
+            "year": 2011,
+            "population_scope": "Persons",
+            "residence_scope": "Total",
+            "value": 75.36,
+            "unit": "percent",
+            "derivation": None,
+        }
+    ],
+    "citations": [
+        {
+            "citation_id": "citation-1",
+            "document_id": "census-2011-karnataka-pca-highlights",
+            "document_title": "Primary Census Abstract Data Highlights: Karnataka",
+            "page_number": 50,
+            "snippet": "Karnataka  Persons  Total  75.36",
+            "chunk_id": "f725734b-65b8-58e2-9e50-ad0d4cc41e27",
+            "section_path": ["Literacy rate"],
+            "evidence_span": {
+                "evidence_id": "f725734b-65b8-58e2-9e50-ad0d4cc41e27",
+                "start_offset": 100,
+                "end_offset": 133,
+            },
+        }
+    ],
+    "artifacts": [],
+    "limitations": [],
+    "refusal": False,
+    "trace_id": "bd52f034-88f2-4c4d-8a5f-938ebc0d0ed8",
+}
+
+CHAT_REFUSAL_EXAMPLE = {
+    "answer": "I can only answer from the supplied Census documents.",
+    "claims": [],
+    "citations": [],
+    "artifacts": [],
+    "limitations": ["The requested topic is outside the supplied document collection."],
+    "refusal": True,
+    "trace_id": "dd147a1f-9119-4753-845b-c23de579e31c",
+}
+
+ERROR_EXAMPLE = {
+    "error_code": "EVIDENCE_ASSESSMENT_TIMEOUT",
+    "message": "Evidence assessment timed out. Please retry the request.",
+    "session_id": SESSION_EXAMPLE["session_id"],
+    "trace_id": "e8bf0d0e-990d-44c2-9796-eeb13c59ec18",
+    "retryable": True,
+}
+
+
+@router.post(
+    "/sessions",
+    response_model=SessionRecord,
+    responses={200: {"content": {"application/json": {"example": SESSION_EXAMPLE}}}},
+    tags=["agent"],
+)
 async def create_session() -> SessionRecord:
     return await get_agent_service().create_session()
 
@@ -63,7 +141,38 @@ async def get_session_context(session_id: str) -> SessionContextStatus:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
-@router.get("/sessions/{session_id}/artifacts", response_model=ArtifactListing, tags=["artifacts"])
+@router.get(
+    "/sessions/{session_id}/artifacts",
+    response_model=ArtifactListing,
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "artifacts": [
+                            {
+                                "artifact_id": "9027752e-7018-4591-b29e-6f63c3f9abaf",
+                                "artifact_type": "chart",
+                                "title": "Karnataka and Odisha literacy rates",
+                                "filename": "chart.png",
+                                "media_type": "image/png",
+                                "byte_size": 48123,
+                                "sha256": "0" * 64,
+                                "session_id": SESSION_EXAMPLE["session_id"],
+                                "run_id": "bd52f034-88f2-4c4d-8a5f-938ebc0d0ed8",
+                                "source_manifest_path": "source-manifest.json",
+                                "download_url": (
+                                    "/sessions/example/artifacts/example/files/chart.png"
+                                ),
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    },
+    tags=["artifacts"],
+)
 async def list_artifacts(session_id: str) -> ArtifactListing:
     service = get_agent_service()
     try:
@@ -92,7 +201,23 @@ async def get_artifact(session_id: str, artifact_id: str) -> ArtifactDescriptor:
     return artifact
 
 
-@router.get("/sessions/{session_id}/artifacts/{artifact_id}/files/{filename}", tags=["artifacts"])
+@router.get(
+    "/sessions/{session_id}/artifacts/{artifact_id}/files/{filename}",
+    responses={
+        200: {
+            "description": "Allowlisted validated artifact file",
+            "content": {
+                "image/png": {"schema": {"type": "string", "format": "binary"}},
+                "text/csv": {"example": "Region,Literacy rate\nKarnataka,75.36\n"},
+                "text/markdown": {"example": "| Region | Literacy rate |\n|---|---:|"},
+                "application/json": {
+                    "example": {"artifact_id": "9027752e-7018-4591-b29e-6f63c3f9abaf"}
+                },
+            },
+        }
+    },
+    tags=["artifacts"],
+)
 async def download_artifact_file(session_id: str, artifact_id: str, filename: str) -> FileResponse:
     service = get_agent_service()
     try:
@@ -122,10 +247,32 @@ def executor_health() -> ExecutorHealth:
     "/chat",
     response_model=AgentResponse,
     responses={
-        500: {"model": AgentErrorResponse},
-        502: {"model": AgentErrorResponse},
-        503: {"model": AgentErrorResponse},
-        504: {"model": AgentErrorResponse},
+        200: {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "success": {"value": CHAT_SUCCESS_EXAMPLE},
+                        "refusal": {"value": CHAT_REFUSAL_EXAMPLE},
+                    }
+                }
+            }
+        },
+        500: {
+            "model": AgentErrorResponse,
+            "content": {"application/json": {"example": ERROR_EXAMPLE}},
+        },
+        502: {
+            "model": AgentErrorResponse,
+            "content": {"application/json": {"example": ERROR_EXAMPLE}},
+        },
+        503: {
+            "model": AgentErrorResponse,
+            "content": {"application/json": {"example": ERROR_EXAMPLE}},
+        },
+        504: {
+            "model": AgentErrorResponse,
+            "content": {"application/json": {"example": ERROR_EXAMPLE}},
+        },
     },
     tags=["agent"],
 )
@@ -157,7 +304,39 @@ async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
         return JSONResponse(status_code=status_code, content=payload.model_dump())
 
 
-@router.get("/runs/{run_id}/trace", response_model=RunTrace, tags=["agent"])
+@router.get(
+    "/runs/{run_id}/trace",
+    response_model=RunTrace,
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "session_id": SESSION_EXAMPLE["session_id"],
+                        "run_id": "bd52f034-88f2-4c4d-8a5f-938ebc0d0ed8",
+                        "events": [
+                            {
+                                "timestamp": "2026-01-01T12:00:01Z",
+                                "event": "retrieval_completed",
+                                "node": "retrieve",
+                                "details": {"candidate_count": 10},
+                                "latency_ms": 84.2,
+                            }
+                        ],
+                        "tool_calls": [],
+                        "errors": [],
+                        "status": "success",
+                        "error_code": None,
+                        "run_status": "completed",
+                        "answer_status": "answered",
+                        "refusal_reason": None,
+                    }
+                }
+            }
+        }
+    },
+    tags=["agent"],
+)
 def run_trace(run_id: str) -> RunTrace:
     try:
         trace = get_agent_service().get_trace(run_id)
@@ -188,6 +367,27 @@ def _store() -> QdrantStore:
     )
 
 
+def _public_documents() -> list[DocumentPublicSummary]:
+    """Read portable public metadata without scrolling every vector payload."""
+    generated = get_settings().data_root / "manifests" / "generated"
+    documents: list[DocumentPublicSummary] = []
+    try:
+        paths = sorted(generated.glob("*.json"))
+        for path in paths:
+            manifest = DocumentManifest.model_validate_json(path.read_text(encoding="utf-8"))
+            documents.append(
+                DocumentPublicSummary(
+                    document_id=manifest.document_id,
+                    title=manifest.title,
+                    region=manifest.region,
+                    source_checksum=manifest.source_checksum,
+                )
+            )
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=503, detail="Document catalog unavailable") from error
+    return documents
+
+
 @router.get("/health/qdrant", response_model=QdrantHealthResponse, tags=["health"])
 def qdrant_health() -> QdrantHealthResponse:
     settings = get_settings()
@@ -208,23 +408,111 @@ def qdrant_health() -> QdrantHealthResponse:
         )
 
 
-@router.get("/documents", response_model=list[DocumentSummary], tags=["documents"])
+@router.get(
+    "/documents",
+    response_model=list[DocumentSummary],
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": [
+                        {
+                            "document_id": "census-2011-karnataka-pca-highlights",
+                            "title": "Primary Census Abstract Data Highlights: Karnataka",
+                            "region": "Karnataka",
+                            "source_checksum": "0" * 64,
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    tags=["documents"],
+)
 def documents() -> list[DocumentSummary]:
+    return [DocumentSummary.model_validate(item.model_dump()) for item in _public_documents()]
+
+
+@router.get(
+    "/documents/{document_id}/coverage",
+    response_model=DocumentCoverageSummary,
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "document": {
+                            "document_id": "census-2011-karnataka-pca-highlights",
+                            "title": "Primary Census Abstract Data Highlights: Karnataka",
+                            "region": "Karnataka",
+                            "source_checksum": "0" * 64,
+                        },
+                        "coverage": {
+                            "document_id": "census-2011-karnataka-pca-highlights",
+                            "pdf_page_count": 82,
+                            "indexed_pages": 69,
+                            "blank_decorative_pages": 1,
+                            "excluded_visual_pages": 12,
+                            "failed_mappings": 0,
+                            "percentage_pages_indexed": 84.15,
+                            "page_lists_by_status": {"excluded_unverified_visual": [13]},
+                            "pages": [
+                                {
+                                    "page_number": 13,
+                                    "status": "excluded_unverified_visual",
+                                    "reason": "Reviewed visual page",
+                                }
+                            ],
+                        },
+                        "limitations": [
+                            {
+                                "document_id": "census-2011-karnataka-pca-highlights",
+                                "excluded_pages": [13],
+                                "statuses": ["excluded_unverified_visual"],
+                                "message": (
+                                    "Some visual pages were excluded from automated answering."
+                                ),
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    },
+    tags=["documents"],
+)
+def document_coverage(document_id: str) -> DocumentCoverageSummary:
+    settings = get_settings()
+    document = next(
+        (item for item in _public_documents() if item.document_id == document_id),
+        None,
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Unknown document")
+    report_path = settings.data_root / "processed" / "dry-run-report.json"
+    if not report_path.is_file():
+        report_path = settings.data_root / "processed" / "idempotency-report.json"
     try:
-        payloads = _store().list_documents()
-        return [
-            DocumentSummary(
-                document_id=str(payload["document_id"]),
-                title=str(payload["document_title"]),
-                region=str(payload["region"]),
-                source_checksum=str(payload["source_checksum"]),
-            )
-            for payload in payloads
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        record = next(
+            item for item in report.get("documents", []) if item.get("document_id") == document_id
+        )
+        coverage = DocumentCoverageReport.model_validate(record["coverage"])
+        limitations = [
+            CoverageLimitation.model_validate(item) for item in record.get("limitations", [])
         ]
-    except Exception as error:
-        raise HTTPException(
-            status_code=503, detail=f"Qdrant error: {type(error).__name__}"
-        ) from error
+    except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=503, detail="Coverage report unavailable") from error
+    return DocumentCoverageSummary(
+        document=DocumentPublicSummary(
+            document_id=document_id,
+            title=document.title,
+            region=document.region,
+            source_checksum=document.source_checksum,
+        ),
+        coverage=coverage,
+        limitations=limitations,
+    )
 
 
 @router.post("/admin/ingest", response_model=IngestionReport, tags=["admin"])

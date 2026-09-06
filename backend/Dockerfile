@@ -6,8 +6,11 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
 COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY docker-compose.yml ./docker-compose.yml
 COPY backend ./backend
 COPY executor ./executor
+COPY frontend ./frontend
 COPY scripts ./scripts
 COPY evals ./evals
 COPY skills ./skills

@@ -143,6 +143,21 @@ class CoverageLimitation(BaseModel):
     message: str
 
 
+class DocumentPublicSummary(BaseModel):
+    document_id: str
+    title: str
+    region: str
+    source_checksum: str
+
+
+class DocumentCoverageSummary(BaseModel):
+    """Public read-only document metadata and its trusted ingestion coverage."""
+
+    document: DocumentPublicSummary
+    coverage: DocumentCoverageReport
+    limitations: list[CoverageLimitation] = Field(default_factory=list)
+
+
 class ChunkMetadata(BaseModel):
     """Citation and filtering metadata stored in Qdrant payloads."""
 

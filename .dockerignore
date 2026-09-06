@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+data
+workspace
+*.pem
+*.key
+*credentials*.json
+*service-account*.json

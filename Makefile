@@ -1,4 +1,4 @@
-.PHONY: sync test format format-check lint typecheck check verify-vertex ingest-dry-run run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report
+.PHONY: sync test format format-check lint typecheck check verify-vertex ingest-dry-run run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security
 
 sync:
 	uv sync --frozen
@@ -43,3 +43,9 @@ artifact-replay:
 
 artifact-schema-report:
 	uv run --frozen python scripts/report_artifact_schema.py --output docs/artifact-schema-complexity.json
+
+ui-smoke:
+	uv run --frozen python scripts/smoke_ui_offline.py
+
+frontend-security:
+	docker compose exec frontend python -m frontend.security_check

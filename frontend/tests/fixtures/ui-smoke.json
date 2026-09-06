@@ -1,0 +1,81 @@
+{
+  "lookup": {
+    "answer": "Karnataka's 2011 literacy rate was 75.36 percent.",
+    "claims": [{
+      "claim_id": "claim-ka",
+      "text": "Karnataka's 2011 literacy rate was 75.36 percent.",
+      "citation_ids": ["citation-ka"],
+      "document_derived": true,
+      "metric": "literacy rate",
+      "region": "Karnataka",
+      "year": 2011,
+      "population_scope": "persons",
+      "residence_scope": "total",
+      "value": 75.36,
+      "unit": "percent",
+      "derivation": null
+    }],
+    "citations": [{
+      "citation_id": "citation-ka",
+      "document_id": "census-2011-karnataka-pca-highlights",
+      "document_title": "Primary Census Abstract Data Highlights: Karnataka",
+      "page_number": 50,
+      "snippet": "| Karnataka | 66.64 | 59.33 | 80.58 | 75.36 | 68.73 | 85.78 |",
+      "chunk_id": "chunk-ka",
+      "section_path": ["Literacy Rate by residence", "2011", "Persons"],
+      "evidence_span": {"evidence_id": "chunk-ka", "start_offset": 0, "end_offset": 65}
+    }],
+    "artifacts": [],
+    "limitations": [],
+    "refusal": false,
+    "trace_id": "trace-lookup"
+  },
+  "comparison": {
+    "answer": "Karnataka was 2.46 percentage points higher than Odisha.",
+    "claims": [
+      {"claim_id":"claim-ka","text":"Karnataka was 75.36 percent.","citation_ids":["citation-ka"],"document_derived":true,"metric":"literacy rate","region":"Karnataka","year":2011,"population_scope":"persons","residence_scope":"total","value":75.36,"unit":"percent","derivation":null},
+      {"claim_id":"claim-od","text":"Odisha was 72.9 percent.","citation_ids":["citation-od"],"document_derived":true,"metric":"literacy rate","region":"Odisha","year":2011,"population_scope":"persons","residence_scope":"total","value":72.9,"unit":"percent","derivation":null},
+      {"claim_id":"claim-difference","text":"The difference was 2.46 percentage points.","citation_ids":["citation-ka","citation-od"],"document_derived":true,"metric":"literacy rate","region":null,"year":2011,"population_scope":"persons","residence_scope":"total","value":2.46,"unit":"percentage_points","derivation":{"operation":"difference","operands":[75.36,72.9],"result":2.46,"unit":"percentage_points","input_claim_ids":["claim-ka","claim-od"]}}
+    ],
+    "citations": [
+      {"citation_id":"citation-ka","document_id":"census-2011-karnataka-pca-highlights","document_title":"Primary Census Abstract Data Highlights: Karnataka","page_number":50,"snippet":"Karnataka | 75.36","chunk_id":"chunk-ka","section_path":["Literacy"],"evidence_span":{"evidence_id":"chunk-ka","start_offset":0,"end_offset":17}},
+      {"citation_id":"citation-od","document_id":"census-2011-odisha-pca-highlights","document_title":"Primary Census Abstract Data Highlights: Odisha","page_number":82,"snippet":"Odisha | 72.9","chunk_id":"chunk-od","section_path":["Literacy"],"evidence_span":{"evidence_id":"chunk-od","start_offset":0,"end_offset":13}}
+    ],
+    "artifacts": [],
+    "limitations": [],
+    "refusal": false,
+    "trace_id": "trace-comparison"
+  },
+  "chart": {
+    "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "csv": "label,value,unit,year\nKarnataka,75.36,percent,2011\nOdisha,72.9,percent,2011\n",
+    "manifest": {"dataset_title":"Literacy comparison","source_records":[]}
+  },
+  "table": {
+    "csv": "region,total,rural,urban\nKarnataka,75.36,68.73,85.78\nOdisha,72.9,64.01,85.75\n",
+    "markdown": "| Region | Total | Rural | Urban |\n|---|---:|---:|---:|\n| Karnataka | 75.36 | 68.73 | 85.78 |",
+    "manifest": {"dataset_title":"Literacy table","source_records":[]}
+  },
+  "refusal": {
+    "answer": "I can only answer from the supplied Census reports.",
+    "claims": [], "citations": [], "artifacts": [], "limitations": [],
+    "refusal": true, "trace_id": "trace-refusal"
+  },
+  "operational_error": {
+    "error_code": "MODEL_OUTPUT_INVALID", "message": "The model response could not be validated.",
+    "session_id": "session", "trace_id": "trace-error", "retryable": false
+  },
+  "trace": {
+    "session_id": "session", "run_id": "trace-comparison", "events": [
+      {"timestamp":"2026-01-01T00:00:00Z","event":"classification","node":"classify_task","details":{"task_type":"comparison"}},
+      {"timestamp":"2026-01-01T00:00:01Z","event":"skill_selected","node":"load_skill","details":{"selected_skill":"chart"}},
+      {"timestamp":"2026-01-01T00:00:02Z","event":"retrieval_completed","node":"retrieve","details":{"candidate_count":20}},
+      {"timestamp":"2026-01-01T00:00:03Z","event":"evidence_assessment","node":"assess_evidence","details":{"sufficient":true}},
+      {"timestamp":"2026-01-01T00:00:04Z","event":"executor_result","node":"execute_artifact","details":{"status":"succeeded","exit_code":0}},
+      {"timestamp":"2026-01-01T00:00:05Z","event":"artifact_validation","node":"inspect_artifact","details":{"valid":true}},
+      {"timestamp":"2026-01-01T00:00:06Z","event":"run_completed","node":null,"details":{"status":"completed"}}
+    ],
+    "tool_calls": [], "errors": [], "status": "success", "error_code": null,
+    "run_status": "completed", "answer_status": "answered", "refusal_reason": null
+  }
+}

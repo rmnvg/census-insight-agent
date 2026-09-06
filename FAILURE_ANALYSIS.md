@@ -1,5 +1,36 @@
 # Failure Analysis
 
+## Streamlit boundary failures
+
+The first live UI request completed successfully in the backend but remained visually pending. A
+rerun that encountered the active submission guard still called `st.rerun()` unconditionally,
+creating a rapid rerun loop that could interrupt the run responsible for committing and displaying
+the response. The same reruns rebuilt the sidebar and repeatedly called document coverage routes;
+those routes each scrolled all 2,058 Qdrant payloads. This caused the visible Qdrant log flood.
+
+Submission now renders its result in the completing run and never forces a post-submit rerun.
+Guarded duplicate events return normally. Sidebar health/document/coverage data is loaded once per
+UI session and refreshed only by an explicit button. Public document metadata comes from the
+checksum-bound generated manifests, while Qdrant readiness remains a separate health check, so
+coverage display no longer scans vector payloads. Citation technical details also no longer use an
+unsupported expander nested inside the citation expander.
+
+If the UI read timeout expires, the backend may still complete the request. The client deliberately
+does not retry `POST /chat`, because a retry could create a second paid model run or artifact. The UI
+shows a sanitized operational error; the evaluator can inspect backend traces using any returned
+trace ID and submit a new turn only after deciding whether the original completed.
+
+A valid answer can outlive a trace or artifact presentation failure. Temporary trace unavailability
+leaves the answer and citations visible. An artifact download with a wrong MIME type, excessive size,
+invalid PNG, malformed CSV/manifest, or backend error is rejected locally and shown as “Artifact
+could not be displayed”; the chat request is never repeated and the UI never claims that artifact
+was validated.
+
+Streamlit browser state is not durable conversation evidence. A refresh may lose displayed turns or
+create a new backend session until URL/session restoration exists, but it cannot corrupt or delete
+the prior LangGraph checkpoint. The new-conversation action intentionally clears only the current UI
+display and allocates a distinct backend session.
+
 ## Unverified visual OCR
 
 Twelve Karnataka chart and thematic-map pages produced non-empty Tesseract output, but inspection

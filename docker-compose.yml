@@ -60,18 +60,50 @@ services:
         condition: service_healthy
       executor:
         condition: service_healthy
+    networks:
+      - frontend_api
+      - backend_data
 
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
     environment:
-      BACKEND_URL: http://backend:8000
+      CENSUS_API_BASE_URL: http://backend:8000
+      CENSUS_UI_CONNECT_TIMEOUT_SECONDS: ${CENSUS_UI_CONNECT_TIMEOUT_SECONDS:-5}
+      CENSUS_UI_READ_TIMEOUT_SECONDS: ${CENSUS_UI_READ_TIMEOUT_SECONDS:-180}
+      CENSUS_UI_MAX_ARTIFACT_BYTES: ${CENSUS_UI_MAX_ARTIFACT_BYTES:-10485760}
     ports:
       - "8501:8501"
+    read_only: true
+    user: "10002:10002"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 0.75
+    tmpfs:
+      - /tmp:size=128m,noexec,nosuid,nodev,uid=10002,gid=10002
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2).status == 200",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+      start_period: 10s
     depends_on:
       backend:
         condition: service_healthy
+    networks:
+      - frontend_api
 
   executor:
     build:
@@ -112,6 +144,12 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    networks:
+      - backend_data
 
 volumes:
   qdrant_data:
+
+networks:
+  frontend_api: {}
+  backend_data: {}

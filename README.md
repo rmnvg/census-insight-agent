@@ -14,6 +14,78 @@ make check
 
 Run the services locally with the `run-backend`, `run-frontend`, and `run-executor` Make targets, or use Docker Compose after setting `GOOGLE_CREDENTIALS_HOST_PATH` to an ADC JSON file.
 
+## Streamlit application
+
+Docker Desktop (or Docker Engine with Compose v2), a Vertex-enabled GCP project, and local ADC are
+the only host prerequisites. After completing the ADC setup below, copy `.env.example` to `.env`,
+set the required project/model values and the absolute `GOOGLE_CREDENTIALS_HOST_PATH`, then start
+the complete four-service application:
+
+```shell
+docker compose up --build
+```
+
+The first build downloads pinned Python packages and container images and can take several minutes.
+Wait for Qdrant, the executor, backend, and frontend to report healthy. Open:
+
+- Streamlit: http://localhost:8501
+- FastAPI/OpenAPI: http://localhost:8000/docs
+- Qdrant dashboard: http://localhost:6333/dashboard
+
+Streamlit creates one backend session on initial load and reuses its identifier for later turns.
+Only the current message and session ID are posted; durable conversational memory comes from the
+backend LangGraph checkpointer. “New conversation” creates an isolated backend session and clears
+only the visible UI history. A browser refresh may create a new Streamlit session because URL-based
+session restoration is not currently implemented.
+
+Each structured factual claim is displayed with its supporting document, physical one-based PDF
+page, section path, and untouched citation quote. Validated chart/table artifacts are fetched only
+through FastAPI, displayed inline, and offered as PNG/CSV/Markdown/source-manifest downloads.
+“Execution details” shows an allowlisted operational timeline; it never displays prompts, hidden
+reasoning, vectors, credentials, raw source chunks, local paths, or complete checksums. Expected
+refusals remain normal assistant responses, while provider, backend, executor, schema, and download
+failures are shown as sanitized operational errors.
+
+Run all offline quality checks without calling Gemini:
+
+```shell
+docker compose run --rm --no-deps --build backend uv run --frozen ruff format --check .
+docker compose run --rm --no-deps backend uv run --frozen ruff check .
+docker compose run --rm --no-deps backend uv run --frozen mypy
+docker compose run --rm --no-deps backend uv run --frozen pytest -q
+docker compose run --rm --no-deps backend uv run --frozen python scripts/smoke_ui_offline.py
+docker compose config --quiet
+docker compose exec frontend python -m frontend.security_check
+```
+
+Stop services without removing the persistent Qdrant volume:
+
+```shell
+docker compose down
+```
+
+Do not add `--volumes` unless deletion of indexed data is intentional. If startup fails, check
+`docker compose ps` and `docker compose logs backend executor frontend`; verify ports 8000, 8501,
+6333, and 6334 are free; confirm the ADC host path exists; and verify `.env` has the required GCP
+project/model settings. A healthy UI with a backend error usually means the backend is still
+starting or its ADC/model configuration is invalid. An artifact display warning does not resubmit
+the paid chat request—inspect the sanitized trace and executor health instead.
+
+### Manual evaluator flow
+
+No live requests are made by the automated suite. To verify manually, open Streamlit and:
+
+1. Ask “What was Karnataka’s literacy rate in 2011?”
+2. Ask “How does that compare with Odisha?” in the same conversation.
+3. Ask “Which source pages support those values?”
+4. Request a bar chart comparing Karnataka and Odisha literacy rates; inspect and download its PNG,
+   CSV, and source manifest.
+5. Request a table comparing total, rural, and urban literacy rates; inspect and download its CSV,
+   Markdown, and source manifest.
+6. Open “Execution details” and confirm the sanitized ordered trace.
+7. Ask “What was France’s unemployment rate in 2011?” and confirm a graceful scope refusal.
+8. Start a new conversation and confirm the previous session is not reused.
+
 ## Vertex AI prerequisites
 
 1. Create or select a Google Cloud project with billing configured.
