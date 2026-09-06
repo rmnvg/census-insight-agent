@@ -24,4 +24,8 @@ Retrieval combines 768-dimensional Gemini dense vectors and local FastEmbed BM25
 
 ## Deferred work
 
-Full LangGraph orchestration and final-answer generation remain intentionally deferred.
+Deliberately out of scope for this submission: document upload/re-ingestion via the UI (the brief
+supplies documents on disk), streamed token output, URL-restorable browser sessions, a durable job
+broker in place of the filesystem executor queue, and microVM-grade executor isolation. See
+`DESIGN.md`'s "Tradeoffs, alternatives, and intentionally skipped work" for the full list and
+reasoning.
