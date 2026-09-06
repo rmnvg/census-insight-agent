@@ -21,7 +21,7 @@ def render_response(
     render_claims(response.claims, response.citations)
     render_citations(response.citations)
     if response.limitations:
-        with st.expander("Coverage limitations"):
+        with st.expander("Coverage limitations", icon="⚠️"):
             for limitation in response.limitations:
                 st.write(limitation)
     artifact_errors = render_artifacts(response.artifacts, api)

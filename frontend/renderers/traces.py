@@ -1,3 +1,5 @@
+from typing import Literal
+
 import streamlit as st
 
 from frontend.models import OperationalApiError, TraceResponse
@@ -10,21 +12,26 @@ def render_trace(
     error: OperationalApiError | None = None,
     artifact_errors: list[str] | None = None,
 ) -> None:
-    with st.expander("Execution details", expanded=False):
+    with st.expander("Execution details", icon="🔍", expanded=False):
         if error is not None:
-            st.text(f"Error code: {error.error_code}")
+            st.badge(error.error_code, color="red")
             if error.trace_id:
-                st.text(f"Trace ID: {error.trace_id}")
-            st.text(f"Retryable: {'yes' if error.retryable else 'no'}")
+                st.caption(f"Trace ID: `{error.trace_id}`")
+            st.caption(f"Retryable: {'yes' if error.retryable else 'no'}")
         if artifact_errors:
             for item in artifact_errors:
-                st.text(f"Artifact: {item}")
+                st.badge(f"Artifact: {item}", color="orange")
         if trace is None:
             st.caption("Execution trace is unavailable. The answer above is preserved.")
             return
-        st.caption(f"Run {trace.run_id[:8]}… · {trace.run_status} · {trace.answer_status}")
+        status_color: Literal["green", "red"] = (
+            "green" if trace.run_status == "completed" else "red"
+        )
+        st.caption(f"Run `{trace.run_id[:8]}…`")
+        st.badge(trace.run_status, color=status_color)
+        st.badge(trace.answer_status, color="blue")
         if trace.error_code:
-            st.text(f"Run error: {trace.error_code}")
+            st.badge(f"Run error: {trace.error_code}", color="red")
         for index, event in enumerate(sanitize_trace(trace), 1):
             title = f"{index}. {event.event}"
             if event.node:

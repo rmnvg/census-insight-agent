@@ -17,6 +17,8 @@ from frontend.state import (
     replace_conversation,
 )
 
+_ASSISTANT_AVATAR = "📊"
+
 
 def _client() -> CensusApiClient:
     return CensusApiClient(UiSettings.from_environment())
@@ -36,7 +38,8 @@ def _ensure_session(api: CensusApiClient) -> str:
 
 def _render_history(api: CensusApiClient) -> None:
     for item in st.session_state.messages:
-        with st.chat_message(item["role"]):
+        avatar = _ASSISTANT_AVATAR if item["role"] == "assistant" else None
+        with st.chat_message(item["role"], avatar=avatar):
             if item["role"] == "user":
                 st.markdown(item["message"])
                 continue
@@ -87,7 +90,7 @@ def _submit(api: CensusApiClient, session_id: str, prompt: str) -> bool:
                 }
             )
             status.update(label="Complete", state="complete", expanded=False)
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
             render_response(
                 response,
                 api,
@@ -106,7 +109,7 @@ def _submit(api: CensusApiClient, session_id: str, prompt: str) -> bool:
                 "trace": trace.model_dump(mode="json") if trace else None,
             }
         )
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
             st.warning(error.error.message)
             if st.session_state.show_execution_details:
                 render_trace(trace, error=error.error)
@@ -142,11 +145,16 @@ def main() -> None:
                 replace_conversation(_state(), replacement)
                 st.rerun()
 
-        st.title("Census Insight Agent")
+        title_col, badge_col = st.columns([5, 1], vertical_alignment="center")
+        with title_col:
+            st.title("📊 Census Insight Agent")
+        with badge_col:
+            st.badge("Citation-safe", color="green", icon="✅")
         st.caption(
             "Ask questions about the supplied Census reports. Answers use physical PDF-page "
             "citations and citation-safe evidence."
         )
+        st.divider()
         _render_history(api)
 
         queued = st.session_state.queued_prompt

@@ -21,20 +21,25 @@ EXAMPLE_QUESTIONS = [
 
 
 def render_sidebar(api: CensusApiClient, session_id: str) -> bool:
-    st.sidebar.title("Census Insight Agent")
+    st.sidebar.title("📊 Census Insight Agent")
     st.sidebar.caption("Citation-grounded analysis of the supplied 2011 Census reports.")
-    st.sidebar.text(f"Session: {session_id[:8]}…")
-    new_conversation = st.sidebar.button("New conversation", use_container_width=True)
+    st.sidebar.caption(f"🔑 Session `{session_id[:8]}…`")
+    new_conversation = st.sidebar.button(
+        "New conversation", use_container_width=True, icon="🆕", type="primary"
+    )
     st.sidebar.toggle("Show execution details", key="show_execution_details")
     state = cast(MutableMapping[str, Any], st.session_state)
-    if st.sidebar.button("Refresh status", use_container_width=True):
+    if st.sidebar.button("Refresh status", use_container_width=True, icon="🔄"):
         clear_sidebar_snapshot(state)
+    st.sidebar.divider()
     snapshot = SidebarSnapshot.model_validate(
         cached_sidebar_snapshot(state, lambda: _load_snapshot(api))
     )
     _render_health(snapshot)
+    st.sidebar.divider()
     _render_documents(snapshot)
-    with st.sidebar.expander("Example questions"):
+    st.sidebar.divider()
+    with st.sidebar.expander("💡 Example questions"):
         for index, question in enumerate(EXAMPLE_QUESTIONS):
             if st.button(question, key=f"example-{index}", use_container_width=True):
                 st.session_state.queued_prompt = question
@@ -72,35 +77,41 @@ def _load_snapshot(api: CensusApiClient) -> SidebarSnapshot:
 
 
 def _render_health(snapshot: SidebarSnapshot) -> None:
-    st.sidebar.markdown("#### Service status")
+    st.sidebar.markdown("**Service status**")
     checks = [
         ("Backend", snapshot.backend_status),
         ("Executor", snapshot.executor_status),
         ("Documents", snapshot.document_status),
     ]
-    for label, status in checks:
-        icon = "✅" if status == "ok" else "⚠️"
-        st.sidebar.caption(f"{icon} {label}")
+    columns = st.sidebar.columns(len(checks))
+    for column, (label, status) in zip(columns, checks, strict=True):
+        with column:
+            if status == "ok":
+                st.badge(label, color="green", icon="✅")
+            else:
+                st.badge(label, color="red", icon="⚠️")
 
 
 def _render_documents(snapshot: SidebarSnapshot) -> None:
+    st.sidebar.markdown("**Source reports**")
     if not snapshot.documents:
         st.sidebar.warning("Document metadata is temporarily unavailable.")
         return
-    st.sidebar.markdown("#### Source reports")
     for document in snapshot.documents:
         coverage = snapshot.coverage_by_document.get(document.document_id)
-        with st.sidebar.expander(document.title):
+        with st.sidebar.container(border=True):
+            st.markdown(f"📄 **{document.title}**")
             st.caption(document.region)
             if coverage is None:
                 st.caption("Coverage information unavailable.")
                 continue
             report = coverage.coverage
             excluded = report.blank_decorative_pages + report.excluded_visual_pages
-            st.metric("Indexed coverage", f"{report.percentage_pages_indexed:.2f}%")
+            fraction = min(max(report.percentage_pages_indexed / 100, 0.0), 1.0)
+            st.progress(fraction, text=f"{report.percentage_pages_indexed:.2f}% indexed")
             st.caption(
                 f"{report.indexed_pages}/{report.pdf_page_count} physical PDF pages indexed · "
                 f"{excluded} excluded"
             )
             if report.excluded_visual_pages:
-                st.info(VISUAL_LIMITATION)
+                st.info(VISUAL_LIMITATION, icon="ℹ️")

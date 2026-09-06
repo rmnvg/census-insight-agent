@@ -21,74 +21,85 @@ def render_artifacts(
     return errors
 
 
+_TYPE_ICON = {"chart": "📈", "table": "📋"}
+
+
 def _render_artifact(artifact: ArtifactSummary, api: CensusApiClient) -> None:
-    st.markdown(f"#### {artifact.title}")
-    st.caption(
-        f"Validated {artifact.artifact_type} artifact generated from citation-bound source data."
-    )
-    if artifact.artifact_type == "chart":
-        chart = api.download_artifact(artifact.session_id, artifact.artifact_id, "chart.png")
-        validate_png(chart.content)
-        st.image(chart.content, caption=artifact.title, use_container_width=True)
-        st.download_button(
-            "Download chart PNG",
-            chart.content,
-            file_name="chart.png",
-            mime="image/png",
-            key=f"png-{artifact.artifact_id}",
+    icon = _TYPE_ICON.get(artifact.artifact_type, "🗂️")
+    with st.container(border=True):
+        st.markdown(f"#### {icon} {artifact.title}")
+        st.caption(
+            f"Validated {artifact.artifact_type} artifact generated from "
+            "citation-bound source data."
         )
-        csv_file = api.download_artifact(
-            artifact.session_id, artifact.artifact_id, "plotted-data.csv"
-        )
-        with st.expander("Plotted data"):
+        if artifact.artifact_type == "chart":
+            chart = api.download_artifact(artifact.session_id, artifact.artifact_id, "chart.png")
+            validate_png(chart.content)
+            st.image(chart.content, caption=artifact.title, use_container_width=True)
+            st.download_button(
+                "Download chart PNG",
+                chart.content,
+                file_name="chart.png",
+                mime="image/png",
+                key=f"png-{artifact.artifact_id}",
+                icon="⬇️",
+            )
+            csv_file = api.download_artifact(
+                artifact.session_id, artifact.artifact_id, "plotted-data.csv"
+            )
+            with st.expander("Plotted data", icon="🔢"):
+                st.dataframe(parse_csv(csv_file.content), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download plotted CSV",
+                csv_file.content,
+                file_name="plotted-data.csv",
+                mime="text/csv",
+                key=f"csv-{artifact.artifact_id}",
+                icon="⬇️",
+            )
+        elif artifact.artifact_type == "table":
+            csv_file = api.download_artifact(artifact.session_id, artifact.artifact_id, "table.csv")
             st.dataframe(parse_csv(csv_file.content), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download table CSV",
+                csv_file.content,
+                file_name="table.csv",
+                mime="text/csv",
+                key=f"table-csv-{artifact.artifact_id}",
+                icon="⬇️",
+            )
+            markdown = api.download_artifact(artifact.session_id, artifact.artifact_id, "table.md")
+            with st.expander("Plain Markdown table", icon="📝"):
+                st.code(markdown.content.decode("utf-8"), language=None, wrap_lines=True)
+            st.download_button(
+                "Download table Markdown",
+                markdown.content,
+                file_name="table.md",
+                mime="text/markdown",
+                key=f"table-md-{artifact.artifact_id}",
+                icon="⬇️",
+            )
+        else:
+            raise ValueError("Unsupported artifact type")
+        manifest = api.download_artifact(
+            artifact.session_id, artifact.artifact_id, "source-manifest.json"
+        )
+        validate_source_manifest(manifest.content)
         st.download_button(
-            "Download plotted CSV",
-            csv_file.content,
-            file_name="plotted-data.csv",
-            mime="text/csv",
-            key=f"csv-{artifact.artifact_id}",
+            "Download source manifest",
+            manifest.content,
+            file_name="source-manifest.json",
+            mime="application/json",
+            key=f"manifest-{artifact.artifact_id}",
+            icon="⬇️",
         )
-    elif artifact.artifact_type == "table":
-        csv_file = api.download_artifact(artifact.session_id, artifact.artifact_id, "table.csv")
-        st.dataframe(parse_csv(csv_file.content), use_container_width=True, hide_index=True)
-        st.download_button(
-            "Download table CSV",
-            csv_file.content,
-            file_name="table.csv",
-            mime="text/csv",
-            key=f"table-csv-{artifact.artifact_id}",
-        )
-        markdown = api.download_artifact(artifact.session_id, artifact.artifact_id, "table.md")
-        with st.expander("Plain Markdown table"):
-            st.code(markdown.content.decode("utf-8"), language=None, wrap_lines=True)
-        st.download_button(
-            "Download table Markdown",
-            markdown.content,
-            file_name="table.md",
-            mime="text/markdown",
-            key=f"table-md-{artifact.artifact_id}",
-        )
-    else:
-        raise ValueError("Unsupported artifact type")
-    manifest = api.download_artifact(
-        artifact.session_id, artifact.artifact_id, "source-manifest.json"
-    )
-    validate_source_manifest(manifest.content)
-    st.download_button(
-        "Download source manifest",
-        manifest.content,
-        file_name="source-manifest.json",
-        mime="application/json",
-        key=f"manifest-{artifact.artifact_id}",
-    )
-    with st.expander("Artifact metadata"):
-        st.json(
-            {
-                "artifact_id": artifact.artifact_id,
-                "type": artifact.artifact_type,
-                "size_bytes": artifact.byte_size,
-                "source_manifest": "Validated and available for download",
-            },
-            expanded=False,
-        )
+        with st.expander("Artifact metadata", icon="🏷️"):
+            st.json(
+                {
+                    "artifact_id": artifact.artifact_id,
+                    "type": artifact.artifact_type,
+                    "size_bytes": artifact.byte_size,
+                    "source_manifest": "Validated and available for download",
+                },
+                expanded=False,
+            )
