@@ -518,6 +518,8 @@ def document_coverage(document_id: str) -> DocumentCoverageSummary:
 @router.post("/admin/ingest", response_model=IngestionReport, tags=["admin"])
 def ingest(request: IngestRequest) -> IngestionReport:
     settings = get_settings()
+    if not settings.admin_ingestion_enabled:
+        raise HTTPException(status_code=403, detail="HTTP ingestion is disabled; use the CLI")
     service = IngestionService(settings) if request.dry_run else IngestionService.live(settings)
     try:
         return service.ingest(

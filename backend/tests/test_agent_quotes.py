@@ -75,6 +75,76 @@ def test_wrong_year_or_category_numeric_match_is_rejected() -> None:
     )
 
 
+def test_generic_total_wording_does_not_require_literal_total_in_source() -> None:
+    # Discovered live: a claim naturally saying "the total number of literates" was rejected
+    # because the source sentence just says "the number of literates" (Total is this corpus's
+    # documented default residence scope, so source prose routinely omits the word for the
+    # baseline case). "total" here is ordinary English, not a Census rural/urban/persons
+    # assertion, and must not require the source to restate it verbatim.
+    item = evidence("The number of literates in Odisha is 26,742,595 in Census 2011.")
+    assert quote_supports_claim(
+        claim("The total number of literates in Odisha was 26,742,595 in 2011."), item.text, item
+    )
+
+
+def test_rural_urban_wording_still_requires_matching_source_category() -> None:
+    # The relaxation above must stay narrow: genuine residence/population categories are still
+    # confirmed against the trusted context, unlike the generic-English "total" case.
+    item = evidence("The number of literates in Odisha is 26,742,595 in Census 2011.")
+    assert not quote_supports_claim(
+        claim("The rural number of literates in Odisha was 26,742,595 in 2011."), item.text, item
+    )
+
+
+def test_sentence_stating_no_year_defaults_to_corpus_report_year() -> None:
+    # Discovered live: Census "Executive Summary" prose commonly states a current-period figure
+    # without restating its year, even when an explicit comparison year appears elsewhere in the
+    # same passage (e.g. "WPR works out to 41.8 per cent. This is higher than the corresponding
+    # WPR of 38.8 per cent in Census 2001." never states "2011" anywhere). Every document in this
+    # corpus is exclusively a Census 2011 report, so a sentence naming no year at all may still
+    # support a year=2011 claim.
+    item = evidence("The Work Participation Rate (WPR) for the state works out to 41.8 per cent.")
+    assert quote_supports_claim(
+        claim("The Work Participation Rate for Karnataka was 41.8 percent in 2011."),
+        item.text,
+        item,
+    )
+
+
+def test_sentence_stating_a_different_year_still_rejects_wrong_year_claim() -> None:
+    # The corpus-default-year allowance above must stay narrow: it only ever applies when the
+    # sentence names no year at all. A sentence that explicitly names a different year must
+    # still be rejected, or a 2001 comparison figure could be cited as if it were 2011's.
+    item = evidence("In 2001, the Work Participation Rate (WPR) was 41.8 per cent.")
+    assert not quote_supports_claim(
+        claim("The Work Participation Rate for Karnataka was 41.8 percent in 2011."),
+        item.text,
+        item,
+    )
+
+
+def test_children_population_scope_matches_singular_child_wording() -> None:
+    # Discovered live: the model set population_scope="Children (0-6 years)" for a child sex
+    # ratio claim, but Census source prose consistently says "child sex ratio" (singular). This
+    # is a morphological variant of the same category, not a different assertion.
+    item = evidence(
+        "Census 2011 marks a considerable fall in child sex ratio (0-6 years) from 953 to 941 "
+        "(-12 points) during 2001-2011."
+    )
+    structured = DraftClaim(
+        claim_id="claim1",
+        text="The child sex ratio (0-6 years) in Odisha fell from 953 in 2001 to 941 in 2011.",
+        evidence_ids=[item.chunk_id],
+        metric="Child Sex Ratio",
+        region="Karnataka",
+        year=2011,
+        population_scope="Children (0-6 years)",
+        value=941.0,
+        unit="ratio",
+    )
+    assert quote_supports_claim(structured, item.text, item)
+
+
 def test_table_quote_keeps_contiguous_header_and_relevant_row() -> None:
     item = evidence(
         "| State | Literacy Rate 2011 |\n"

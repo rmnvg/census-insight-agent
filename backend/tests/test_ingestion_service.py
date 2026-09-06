@@ -99,3 +99,11 @@ def test_unchanged_reingestion_skips_embedding_calls(tmp_path: Path, monkeypatch
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["pdf_path"] == "source/pdf/sample.pdf"
     assert str(tmp_path) not in manifest_path.read_text(encoding="utf-8")
+
+    # The PDF and number of chunks stay the same, but corrected extraction must be indexed.
+    page.text = "Corrected census evidence"
+    corrected = service.ingest(source_dir=source)
+    assert corrected.chunks == first.chunks
+    assert corrected.processed_documents == 1
+    assert corrected.skipped_unchanged_documents == 0
+    assert dense.calls == 2

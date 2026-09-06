@@ -367,7 +367,9 @@ class AgentGraph:
         ]
         resolved_query = resolved.query
         target_guard_applied = bool(
-            state["task_type"] == "comparison" and target_names and missing_targets
+            state["task_type"] in {"comparison", "artifact_chart", "artifact_table"}
+            and target_names
+            and missing_targets
         )
         if target_guard_applied:
             resolved_query = (
@@ -381,16 +383,24 @@ class AgentGraph:
         resolved_requirement = resolved.artifact_requirement
         classified_requirement = classification.artifact_requirement
         if resolved_requirement is not None and classified_requirement is not None:
+            merged_regions = list(resolved_requirement.regions)
+            merged_regions_folded = {region.casefold() for region in merged_regions}
+            for region in classified_requirement.regions:
+                if region.casefold() not in merged_regions_folded:
+                    merged_regions.append(region)
+                    merged_regions_folded.add(region.casefold())
             resolved_requirement = resolved_requirement.model_copy(
                 update={
-                    "regions": resolved_requirement.regions or classified_requirement.regions,
+                    "regions": merged_regions,
                     "year": resolved_requirement.year or classified_requirement.year,
                     "population_scope": resolved_requirement.population_scope
                     or classified_requirement.population_scope,
                     "residence_scope": resolved_requirement.residence_scope
                     or classified_requirement.residence_scope,
                     "comparison": (
-                        resolved_requirement.comparison or classified_requirement.comparison
+                        resolved_requirement.comparison
+                        or classified_requirement.comparison
+                        or len(merged_regions) > 1
                     ),
                 }
             )
@@ -487,7 +497,7 @@ class AgentGraph:
             task_type,
         )
         return {
-            "plan": AgentPlan(steps=steps, retrieval_top_k=10, capability_pending=artifact),
+            "plan": AgentPlan(steps=steps, retrieval_top_k=20, capability_pending=artifact),
             "artifact_requirement": requirement,
             "trace_events": [
                 *state.get("trace_events", []),
@@ -1089,6 +1099,19 @@ class AgentGraph:
                     selected_evidence_by_target=direct_by_target,
                     selected_evidence_ids=valid_selected_ids,
                     categories={item.evidence_id: item.relevance for item in assessment.items},
+                    match_flags={
+                        item.evidence_id: {
+                            "entity_match": item.entity_match,
+                            "metric_match": item.metric_match,
+                            "year_match": item.year_match,
+                            "population_scope_match": item.population_scope_match,
+                            "residence_scope_match": item.residence_scope_match,
+                            "has_explicit_value": item.has_explicit_value,
+                            "has_unit": item.has_unit,
+                            "unit_compatible": item.unit_compatible,
+                        }
+                        for item in assessment.items
+                    },
                     explanation=assessment.explanation,
                 ),
             ],
@@ -1262,9 +1285,23 @@ class AgentGraph:
                 },
             ) from error
         proposal = None
+        proposal_query = state["resolved_query"]
+        if not requirement.residence_scopes:
+            # The deterministic hydration default (see `hydrate_artifact_dataset`) accepts only a
+            # single residence category ("total" unless the requirement names one) when the
+            # requirement did not explicitly ask for a multi-category breakdown. Without this
+            # hint, the proposal model tends to pull every residence column present in a source
+            # table (Total/Rural/Urban) since they are all visible in the evidence text, which
+            # hydration then rejects. Naming the single accepted category up front keeps the
+            # proposal aligned with what hydration will actually accept.
+            effective_residence = requirement.residence_scope or "total"
+            proposal_query = (
+                f"{proposal_query} Report only the '{effective_residence}' residence category "
+                "for each entity; do not include other residence breakdowns."
+            )
         try:
             proposal = await self.model.propose_artifact_dataset(
-                state["resolved_query"],
+                proposal_query,
                 state["task_type"],
                 selected_evidence,
                 rank_all=requirement.rank_all,
@@ -1667,6 +1704,22 @@ class AgentGraph:
             "trace_events": [
                 *state.get("trace_events", []),
                 self._event(
+                    "validated_citations",
+                    "inspect_artifact",
+                    citations=[
+                        {
+                            "citation_id": item.citation_id,
+                            "document_id": item.document_id,
+                            "page_number": item.page_number,
+                            "chunk_id": item.chunk_id,
+                            "snippet": item.snippet,
+                            "start_offset": item.evidence_span.start_offset,
+                            "end_offset": item.evidence_span.end_offset,
+                        }
+                        for item in response.citations
+                    ],
+                ),
+                self._event(
                     "artifact_validation",
                     "inspect_artifact",
                     valid=True,
@@ -1771,6 +1824,16 @@ class AgentGraph:
         )
         errors = list(result.errors)
         error_codes = list(result.error_codes)
+        expected_ids = {claim.claim_id for claim in source_draft.claims}
+        supported_ids = set(support.supported_claim_ids)
+        unsupported_ids = set(support.unsupported_claim_ids)
+        if (
+            supported_ids | unsupported_ids != expected_ids
+            or supported_ids & unsupported_ids
+            or len(expected_ids) != len(source_draft.claims)
+        ):
+            errors.append("Semantic assessment must classify every claim exactly once")
+            error_codes.append("INCOMPLETE_SUPPORT_ASSESSMENT")
         if support.unsupported_claim_ids:
             errors.append(f"Unsupported claims: {', '.join(support.unsupported_claim_ids)}")
             error_codes.append("UNSUPPORTED_CLAIM")

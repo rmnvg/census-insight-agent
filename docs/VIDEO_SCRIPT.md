@@ -30,7 +30,7 @@ Expand “Execution details,” then open `skills/chart.md` and `backend/app/age
 
 ## 4:00–4:40 — Repository and security
 
-Open `docker-compose.yml`, `scripts/verify_security.py`, and `.github/workflows/ci.yml`. Highlight that only the backend receives read-only ADC; the executor is non-root and network-disabled; the frontend is read-only and sees only FastAPI. Show the latest `make verify-offline` result.
+Open `docker-compose.yml`, `scripts/verify_security.py`, and `.github/workflows/ci.yml`. Highlight that only the backend receives read-only ADC; the executor is non-root and network-disabled; the frontend is read-only and sees only FastAPI. Show the latest offline checks and read-only Qdrant verification result.
 
 ## 4:40–5:00 — Limitations and close
 

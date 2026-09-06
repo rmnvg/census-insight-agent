@@ -4,6 +4,7 @@ import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from uuid import UUID
 
 from backend.app.execution.contracts import ExecutionRequest, ExecutionResult
@@ -43,7 +44,19 @@ class Worker:
                 continue
             try:
                 request = ExecutionRequest.model_validate_json(claimed.read_text(encoding="utf-8"))
-                result = execute_request(request, self.jobs / request.job_id)
+                stopped = Event()
+
+                def keep_alive(stopped: Event = stopped) -> None:
+                    while not stopped.wait(2):
+                        self.heartbeat()
+
+                heartbeat_thread = Thread(target=keep_alive, daemon=True)
+                heartbeat_thread.start()
+                try:
+                    result = execute_request(request, self.jobs / request.job_id)
+                finally:
+                    stopped.set()
+                    heartbeat_thread.join()
             except Exception as error:
                 now = datetime.now(UTC)
                 job_id = claimed.stem

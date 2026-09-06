@@ -15,6 +15,7 @@ _HTML = re.compile(r"<[^>]+>")
 _MARKDOWN = re.compile(r"[*_`]+")
 _NUMBER = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?(?!\w)")
 _WORD = re.compile(r"[a-z0-9]+")
+_PLACEHOLDER_CELL = re.compile(r"[-–—_.]+")
 
 
 class ProposalHydrationError(ValueError):
@@ -162,7 +163,12 @@ def _same_scope(expected: str | None, proposed: str | None, name: str) -> str:
         categories = {"persons", "person", "male", "female"}
         expected_category = _words(expected) & categories
         proposed_category = _words(proposed or "") & categories
-        mismatch = bool(proposed is not None and expected_category != proposed_category)
+        # A proposed value that names no recognized population category (e.g. a model
+        # confusing the residence dimension "Total" with population scope) carries no actual
+        # conflicting assertion and is treated as unspecified, not a mismatch. A proposed value
+        # that does name a category (e.g. "male") is still rejected when it differs from the
+        # expected one.
+        mismatch = bool(proposed_category and expected_category != proposed_category)
     else:
         mismatch = bool(proposed is not None and proposed_value != expected_value)
     if mismatch:
@@ -171,7 +177,13 @@ def _same_scope(expected: str | None, proposed: str | None, name: str) -> str:
 
 
 def _unit_supported(unit: str, header: str, context: str) -> bool:
-    normalized = _fold(unit).replace("percentage", "percent").replace("per cent", "percent")
+    normalized = (
+        _fold(unit)
+        .replace("percentage", "percent")
+        .replace("per cent", "percent")
+        .replace("%", "percent")
+        .strip()
+    )
     trusted = (
         _fold(f"{header} {context}").replace("percentage", "percent").replace("per cent", "percent")
     )
@@ -322,7 +334,9 @@ def count_table_entity_rows(evidence: list[RetrievedEvidence]) -> int:
                 (
                     plain
                     for cell in cells
-                    if (plain := _plain(cell)) and not plain.replace(".", "", 1).isdigit()
+                    if (plain := _plain(cell))
+                    and not plain.replace(".", "", 1).isdigit()
+                    and not _PLACEHOLDER_CELL.fullmatch(plain)
                 ),
                 "",
             )
@@ -349,36 +363,74 @@ def hydrate_artifact_dataset(
     whose label never equals the document's own `region` field, unlike an ordinary comparison
     row; `require_region_label` is relaxed only in that case. The row is still only accepted
     when it is found verbatim as a labeled cell in a trusted table row (see `_match_row`).
+
+    An under-specified request (year/population/residence left unset because the query did not
+    mention them) defaults to this corpus's documented "2011 total persons" convention for any
+    artifact request, not just ranking, rather than failing outright — see the defaulting block
+    below for exactly which checks stay fully enforced against each default.
     """
     validate_trusted_artifact_evidence(evidence)
     expected_type = requirement.artifact_type
     if not proposal.rows:
         raise ProposalHydrationError("EMPTY_PROPOSAL")
     skip_population_match = requirement.rank_all and requirement.population_scope is None
-    if skip_population_match:
-        # Metrics like sex ratio have no population-category column to verify against; default
-        # the stored metadata to the documented "persons" convention without requiring the word
-        # to appear in the trusted table text.
+    if requirement.population_scope is None:
+        # "Total persons" is the documented default population category when a request does not
+        # specify male/female/persons explicitly (see DESIGN.md). For an ordinary chart/table
+        # request this default is still fully verified against the table's Persons/Male/Female
+        # column by the normal _match_row check below; `skip_population_match` (computed above,
+        # before this default is applied) only disables that verification for a ranking metric
+        # like sex ratio that has no population-category column at all.
         requirement = requirement.model_copy(update={"population_scope": "persons"})
-    if requirement.rank_all and requirement.residence_scope is None:
-        # Unlike population scope, residence ("Total"/"Rural"/"Urban") is a real column header
-        # in these statement tables, so the default is still fully verified against the table
-        # by the normal _match_row header check below.
+    if requirement.residence_scope is None and not requirement.residence_scopes:
+        # Residence ("Total"/"Rural"/"Urban") is a real column header in these statement tables,
+        # so this default is always fully verified against the table by the normal _match_row
+        # header check below — it only avoids failing before that check gets a chance to run.
         requirement = requirement.model_copy(update={"residence_scope": "total"})
-    if requirement.rank_all and requirement.year is None:
-        # Every document in this corpus is a Census 2011 report; a ranking request that omits
-        # the year is assumed to mean the current census, still verified against the header.
+    if requirement.year is None:
+        # Every document in this corpus is a Census 2011 report; a request that omits the year
+        # (ranking or not) is assumed to mean the current census, still verified against the
+        # header.
         requirement = requirement.model_copy(update={"year": 2011})
     by_id = {item.chunk_id: item for item in evidence}
     rows: list[dict[str, object]] = []
     sources: list[SourceRecord] = []
     seen: set[tuple[str, str | None, float, str]] = set()
+    seen_scopes: set[tuple[str, str]] = set()
     for index, row in enumerate(proposal.rows, 1):
         item = by_id.get(row.evidence_id)
         if item is None:
             raise ProposalHydrationError("UNKNOWN_EVIDENCE_ID")
         if not re.fullmatch(r"[0-9a-f]{64}", item.source_checksum):
             raise ProposalHydrationError("INVALID_TRUSTED_SOURCE_CHECKSUM")
+        row_requirement = requirement
+        if requirement.residence_scopes:
+            residence = _fold(row.residence_scope or row.series or "")
+            if residence not in requirement.residence_scopes:
+                raise ProposalHydrationError("WRONG_RESIDENCE_SCOPE")
+            # Labels are entity identities. A model may append a presentation category;
+            # normalize only the exact trusted entity plus the verified residence label.
+            label = row.label
+            if re.fullmatch(
+                re.escape(_fold(item.region)) + r"\s*[-,(/:]?\s*" + re.escape(residence) + r"\)?",
+                _fold(label),
+            ):
+                label = item.region
+            row = row.model_copy(
+                update={"label": label, "series": residence, "residence_scope": residence}
+            )
+            row_requirement = requirement.model_copy(update={"residence_scope": residence})
+        # Use the row's own proposed residence value (when the model supplied one) rather than
+        # the possibly-singular collapsed default on `row_requirement`: a proposal spanning
+        # Total/Rural/Urban for the same region is legitimate and must not collide into one
+        # dedup key just because the outer requirement only names a single default residence
+        # scope. A genuinely repeated (label, residence) pair is still caught either way; a
+        # mismatched residence scope is still rejected downstream by `_match_row`/`_same_scope`.
+        dimension_residence = row.residence_scope or row_requirement.residence_scope or ""
+        dimension = (_fold(row.label), _fold(dimension_residence))
+        if dimension in seen_scopes:
+            raise ProposalHydrationError("DUPLICATE_PROPOSAL_ROW")
+        seen_scopes.add(dimension)
         identity = (
             _fold(row.label),
             _fold(row.series) if row.series else None,
@@ -391,7 +443,7 @@ def hydrate_artifact_dataset(
         raw_value, quote = _match_row(
             row,
             item,
-            requirement,
+            row_requirement,
             require_region_label=not requirement.rank_all,
             require_population_scope=not skip_population_match,
             # Unit is a descriptive label, not part of cell selection (metric/year/residence/
@@ -421,7 +473,7 @@ def hydrate_artifact_dataset(
                 region=row.label,
                 year=requirement.year,
                 population_scope=requirement.population_scope,
-                residence_scope=requirement.residence_scope,
+                residence_scope=row_requirement.residence_scope,
                 document_title=item.document_title,
                 document_id=item.document_id,
                 page_number=item.page_number,
@@ -435,6 +487,14 @@ def hydrate_artifact_dataset(
         _fold(region) not in represented for region in requirement.regions
     ):
         raise ProposalHydrationError("MISSING_REQUIRED_TARGET")
+    if requirement.residence_scopes:
+        targets = requirement.regions or sorted(represented)
+        if any(
+            (_fold(region), scope) not in seen_scopes
+            for region in targets
+            for scope in requirement.residence_scopes
+        ):
+            raise ProposalHydrationError("MISSING_REQUIRED_RESIDENCE")
     return ArtifactDataset(
         title=proposal.title,
         task_type="artifact_chart" if expected_type == "chart" else "artifact_table",

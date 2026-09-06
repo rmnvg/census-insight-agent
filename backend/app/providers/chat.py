@@ -7,6 +7,11 @@ from backend.app.config import Settings, get_settings
 def get_chat_model(settings: Settings | None = None) -> BaseChatModel:
     """Build the deterministic Gemini chat model using Vertex AI and ADC."""
     resolved = settings or get_settings()
+    # Deterministic evidence/cell/arithmetic checks run in the application. The default Flash
+    # model need not spend an unbounded thinking budget on each small structured graph step.
+    generation_options = (
+        {"thinking_budget": 0} if resolved.gemini_chat_model == "gemini-2.5-flash" else {}
+    )
     return ChatGoogleGenerativeAI(
         model=resolved.gemini_chat_model,
         project=resolved.google_cloud_project,
@@ -16,4 +21,5 @@ def get_chat_model(settings: Settings | None = None) -> BaseChatModel:
         temperature=0,
         request_timeout=resolved.agent_provider_timeout_seconds,
         max_retries=0,
+        **generation_options,
     )

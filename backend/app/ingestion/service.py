@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import time
@@ -132,6 +133,12 @@ class IngestionService:
                     source_checksum=checksum,
                 )
                 validate_chunks_for_indexing(chunks)
+                content_fingerprint = hashlib.sha256(
+                    json.dumps(
+                        [chunk.model_dump(mode="json") for chunk in chunks],
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
                 result.pages = len(mapping.pages)
                 result.chunks = len(chunks)
                 result.provided_markdown_pages = mapping.markdown_pages
@@ -164,7 +171,7 @@ class IngestionService:
                 else:
                     store, dense_embedder, sparse_encoder = self._require_live_components()
                     state = self._read_state(pair.document_id)
-                    if self._is_unchanged(state, checksum, len(chunks), store):
+                    if self._is_unchanged(state, checksum, len(chunks), store, content_fingerprint):
                         result.skipped_unchanged = True
                         report.skipped_unchanged_documents += 1
                         report.documents.append(result)
@@ -185,6 +192,7 @@ class IngestionService:
                         pair.document_id,
                         checksum=checksum,
                         point_ids=[chunk.chunk_id for chunk in chunks],
+                        content_fingerprint=content_fingerprint,
                     )
                     result.dense_embeddings = len(dense_vectors)
                     result.sparse_embeddings = len(sparse_vectors)
@@ -294,17 +302,21 @@ class IngestionService:
         checksum: str,
         chunk_count: int,
         store: QdrantStore,
+        content_fingerprint: str,
     ) -> bool:
         if not state:
             return False
         return (
             state.get("source_checksum") == checksum
+            and state.get("content_fingerprint") == content_fingerprint
             and state.get("ingestion_version") == self.settings.ingestion_version
             and len(self._state_point_ids(state)) == chunk_count
             and store.document_count(str(state.get("document_id"))) == chunk_count
         )
 
-    def _write_state(self, document_id: str, *, checksum: str, point_ids: list[str]) -> None:
+    def _write_state(
+        self, document_id: str, *, checksum: str, point_ids: list[str], content_fingerprint: str
+    ) -> None:
         path = self._state_path(document_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -312,6 +324,7 @@ class IngestionService:
                 {
                     "document_id": document_id,
                     "source_checksum": checksum,
+                    "content_fingerprint": content_fingerprint,
                     "ingestion_version": self.settings.ingestion_version,
                     "point_ids": point_ids,
                 },

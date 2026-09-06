@@ -10,6 +10,7 @@
 htmlcov
 data
 workspace
+submission
 *.pem
 *.key
 *credentials*.json

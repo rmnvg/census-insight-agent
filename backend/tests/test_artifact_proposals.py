@@ -121,6 +121,43 @@ def evidence() -> list[RetrievedEvidence]:
     ]
 
 
+def test_residence_breakdown_verifies_all_cells_and_rejects_missing_categories() -> None:
+    requested = canonicalize_artifact_requirement(
+        requirement().model_copy(update={"artifact_type": "table"}),
+        "Compare total, rural, and urban literacy rates for North and South in 2011",
+    )
+    assert requested.residence_scope is None
+    assert requested.residence_scopes == ["total", "rural", "urban"]
+    rows = [
+        ArtifactRowProposal(
+            label=f"{region} ({scope})",
+            series=scope,
+            residence_scope=scope,
+            value=value,
+            unit="percent",
+            evidence_id=f"{region.casefold()}-evidence",
+            year=2011,
+        )
+        for region, total in (("North", 71.5), ("South", 72.9))
+        for scope, value in (("total", total), ("rural", 61.25), ("urban", 81.75))
+    ]
+    proposed = proposal(rows=rows)
+    dataset = hydrate_artifact_dataset(proposed, requested, evidence(), "residence breakdown")
+    validate_dataset(dataset, evidence(), requested)
+    assert len(dataset.rows) == 6
+    assert {source.residence_scope for source in dataset.source_records} == {
+        "total",
+        "rural",
+        "urban",
+    }
+    assert {source.region for source in dataset.source_records} == {"North", "South"}
+    with pytest.raises(ProposalHydrationError, match="MISSING_REQUIRED_RESIDENCE"):
+        hydrate_artifact_dataset(proposal(rows=rows[:-1]), requested, evidence(), "breakdown")
+    rows[1] = rows[1].model_copy(update={"value": 81.75})
+    with pytest.raises(ProposalHydrationError, match="UNSUPPORTED_OR_WRONG_TABLE_CELL"):
+        hydrate_artifact_dataset(proposal(rows=rows), requested, evidence(), "breakdown")
+
+
 def test_llm_proposal_schema_is_small_and_excludes_internal_contracts() -> None:
     compact = assert_proposal_schema_safe(ArtifactDatasetProposal)
     full = schema_complexity(ArtifactDataset)
@@ -189,6 +226,31 @@ def test_valid_proposal_hydrates_with_application_owned_provenance() -> None:
         assert source.chunk_id == item.chunk_id
         assert source.source_checksum == item.source_checksum
         assert source.exact_supporting_quote in item.text
+
+
+def test_underspecified_request_defaults_to_2011_total_persons() -> None:
+    # Discovered live: "Create a bar chart comparing Karnataka and Odisha literacy rates."
+    # (no "2011", no "total persons") left year/population/residence unset on classification,
+    # which previously failed hard with MISSING_AUTHORITATIVE_YEAR before the model was ever
+    # asked to propose a dataset. This corpus is entirely Census 2011 data, so an unspecified
+    # request should default to that convention rather than refusing outright.
+    underspecified = requirement().model_copy(
+        update={"year": None, "population_scope": None, "residence_scope": None}
+    )
+    trusted = evidence()
+    dataset = hydrate_artifact_dataset(proposal(), underspecified, trusted, "chart request")
+    assert dataset.source_records[0].year == 2011
+    assert dataset.source_records[0].population_scope == "persons"
+    assert dataset.source_records[0].residence_scope == "total"
+
+
+def test_underspecified_request_still_rejects_wrong_year() -> None:
+    # The default only fills in an absent value; an explicitly wrong one is still rejected.
+    underspecified = requirement().model_copy(update={"year": None})
+    wrong_year_row = proposal().rows[0].model_copy(update={"year": 2001})
+    mismatched = proposal(rows=[wrong_year_row, proposal().rows[1]])
+    with pytest.raises(ProposalHydrationError):
+        hydrate_artifact_dataset(mismatched, underspecified, evidence(), "chart request")
 
 
 def test_plural_literacy_metric_is_canonicalized_before_hydration() -> None:
@@ -370,6 +432,17 @@ def test_total_persons_scope_matches_trusted_persons_table_header() -> None:
     dataset = hydrate_artifact_dataset(value, scoped, evidence(), "chart request")
     validate_dataset(dataset, evidence(), scoped)
     assert {source.population_scope for source in dataset.source_records} == {"Total Persons"}
+
+
+def test_percent_symbol_unit_matches_percent_rate_header() -> None:
+    # Discovered live: the model sometimes describes a rate's unit as "%" rather than the word
+    # "percent"; the trusted header text never contains a literal "%" character either, so this
+    # must resolve through the same "percent" + "rate in header" fallback the word form uses.
+    percent_symbol_rows = [row.model_copy(update={"unit": "%"}) for row in proposal().rows]
+    value = proposal(rows=percent_symbol_rows)
+    dataset = hydrate_artifact_dataset(value, requirement(), evidence(), "chart request")
+    validate_dataset(dataset, evidence(), requirement())
+    assert len(dataset.rows) == 2
 
 
 def test_ambiguous_matching_table_cells_are_rejected() -> None:

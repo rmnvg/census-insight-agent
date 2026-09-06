@@ -60,10 +60,16 @@ def canonicalize_artifact_requirement(
     )
     normalized_metric = " ".join(requirement.metric.split()).casefold()
     metric = _METRIC_ALIASES.get(normalized_metric, requirement.metric.strip())
+    residences = [
+        scope
+        for scope in ("total", "rural", "urban")
+        if re.search(rf"\b{scope}\b", query.casefold())
+    ]
     return requirement.model_copy(
         update={
             "metric": metric,
             "population_scope": population,
-            "residence_scope": residence,
+            "residence_scope": None if len(residences) > 1 else residence,
+            "residence_scopes": residences if len(residences) > 1 else [],
         }
     )

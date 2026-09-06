@@ -36,6 +36,7 @@ class ArtifactDataRequirement(BaseModel):
     regions: list[str] = Field(default_factory=list)
     population_scope: str | None = None
     residence_scope: str | None = None
+    residence_scopes: list[Literal["total", "rural", "urban"]] = Field(default_factory=list)
     comparison: bool = False
     rank_all: bool = False
     rank_direction: Literal["max", "min"] | None = None

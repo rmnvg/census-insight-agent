@@ -81,16 +81,18 @@ def artifact_files(base_url: str, session_id: str, artifact: dict[str, Any]) -> 
             "GET",
             f"/sessions/{session_id}/artifacts/{artifact['artifact_id']}/files/{name}",
         )
-        if status != 200 or not isinstance(content, bytes) or not content:
+        if status != 200 or not content:
             raise EvaluationFailure(f"Missing validated artifact file: {name}")
+        if name == "source-manifest.json":
+            if not isinstance(content, dict) or not content.get("source_records"):
+                raise EvaluationFailure("Artifact manifest lacks source lineage")
+            continue
+        if not isinstance(content, bytes):
+            raise EvaluationFailure(f"Unexpected artifact response: {name}")
         if name.endswith(".png") and not content.startswith(b"\x89PNG\r\n\x1a\n"):
             raise EvaluationFailure("Chart output is not a PNG")
         if name.endswith(".csv") and not list(csv.reader(io.StringIO(content.decode()))):
             raise EvaluationFailure("Artifact CSV is empty")
-        if name == "source-manifest.json":
-            manifest = json.loads(content)
-            if not manifest.get("source_records"):
-                raise EvaluationFailure("Artifact manifest lacks source lineage")
 
 
 def run_case(
@@ -167,6 +169,7 @@ def main() -> int:
             "table",
         ),
         ("summary", "Summarize the key population findings for Odisha.", "grounded"),
+        ("ranking", "Which district had the highest sex ratio in Madhya Pradesh?", "grounded"),
         (
             "inconsistency",
             "Analyze whether the supplied reports contain inconsistent literacy-rate evidence "

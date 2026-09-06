@@ -3,12 +3,17 @@ import time
 from functools import lru_cache
 from typing import Any, cast
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from qdrant_client import QdrantClient
 
-from backend.app.agent.checkpoint import CHECKPOINT_SCHEMA_VERSION, hydrate_agent_state
+from backend.app.agent.checkpoint import (
+    CHECKPOINT_SCHEMA_VERSION,
+    checkpoint_safe,
+    hydrate_agent_state,
+)
 from backend.app.agent.errors import AgentOperationalError
 from backend.app.agent.graph import AgentGraph
 from backend.app.agent.models import (
@@ -56,6 +61,7 @@ class AgentService:
         tools: AgentTools,
     ) -> None:
         self.settings = settings
+        self._session_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self.sessions = SessionStore(settings.workspace_root)
         self.traces = TraceStore(settings.workspace_root)
         self.execution_queue = ExecutionQueueClient(settings.execution_queue_root)
@@ -140,6 +146,14 @@ class AgentService:
 
     async def chat(self, session_id: str, message: str) -> AgentResponse:
         validate_session_id(session_id)
+        # Compose runs one API process. Hold the lock through checkpoint and trace persistence;
+        # weak references release idle session locks without an ever-growing session registry.
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return await self._chat_turn(session_id, message)
+
+    async def _chat_turn(self, session_id: str, message: str) -> AgentResponse:
+        validate_session_id(session_id)
         if not message.strip():
             raise ValueError("Message must be non-empty")
         await self.initialize()
@@ -194,7 +208,7 @@ class AgentService:
                 configurable["checkpoint_id"] = checkpoint_id
                 prior = await self._checkpoint_state(saver, session_id, checkpoint_id)
                 history = prior.get("validated_claim_history", [])
-                initial["validated_claim_history"] = (
+                initial["validated_claim_history"] = checkpoint_safe(
                     history if history else self.traces.recover_validated_claim_history(session_id)
                 )
             config = {
@@ -254,28 +268,40 @@ class AgentService:
         return response
 
     async def _latest_successful_checkpoint(self, saver: Any, session_id: str) -> str | None:
-        async for item in saver.alist({"configurable": {"thread_id": session_id}}):
-            values = item.checkpoint.get("channel_values", {})
-            run_id = values.get("run_id")
-            if values.get("final_response") is not None and isinstance(run_id, str):
-                trace = self.traces.read(run_id)
-                if trace is not None and trace.status == "success":
-                    return cast(str, item.config["configurable"]["checkpoint_id"])
+        agen = saver.alist({"configurable": {"thread_id": session_id}})
+        try:
+            async for item in agen:
+                values = item.checkpoint.get("channel_values", {})
+                run_id = values.get("run_id")
+                if values.get("final_response") is not None and isinstance(run_id, str):
+                    trace = self.traces.read(run_id)
+                    if trace is not None and trace.status == "success":
+                        return cast(str, item.config["configurable"]["checkpoint_id"])
+        finally:
+            await agen.aclose()
         return None
 
     async def _checkpoint_state(
         self, saver: Any, session_id: str, checkpoint_id: str
     ) -> AgentState:
-        async for item in saver.alist({"configurable": {"thread_id": session_id}}):
-            if item.config["configurable"]["checkpoint_id"] == checkpoint_id:
-                return hydrate_agent_state(item.checkpoint.get("channel_values", {}))
+        agen = saver.alist({"configurable": {"thread_id": session_id}})
+        try:
+            async for item in agen:
+                if item.config["configurable"]["checkpoint_id"] == checkpoint_id:
+                    return hydrate_agent_state(item.checkpoint.get("channel_values", {}))
+        finally:
+            await agen.aclose()
         return {}
 
     async def _checkpoint_for_run(self, saver: Any, session_id: str, run_id: str) -> str | None:
-        async for item in saver.alist({"configurable": {"thread_id": session_id}}):
-            values = item.checkpoint.get("channel_values", {})
-            if values.get("run_id") == run_id and values.get("final_response") is not None:
-                return cast(str, item.config["configurable"]["checkpoint_id"])
+        agen = saver.alist({"configurable": {"thread_id": session_id}})
+        try:
+            async for item in agen:
+                values = item.checkpoint.get("channel_values", {})
+                if values.get("run_id") == run_id and values.get("final_response") is not None:
+                    return cast(str, item.config["configurable"]["checkpoint_id"])
+        finally:
+            await agen.aclose()
         return None
 
     async def _persist_failed_trace(
@@ -286,11 +312,15 @@ class AgentService:
         error: AgentOperationalError,
     ) -> None:
         state: AgentState = {}
-        async for item in saver.alist({"configurable": {"thread_id": session_id}}):
-            values = hydrate_agent_state(item.checkpoint.get("channel_values", {}))
-            if values.get("run_id") == run_id:
-                state = values
-                break
+        agen = saver.alist({"configurable": {"thread_id": session_id}})
+        try:
+            async for item in agen:
+                values = hydrate_agent_state(item.checkpoint.get("channel_values", {}))
+                if values.get("run_id") == run_id:
+                    state = values
+                    break
+        finally:
+            await agen.aclose()
         details: dict[str, object] = {
             "error_code": error.code,
             "retry_count": error.retry_count,

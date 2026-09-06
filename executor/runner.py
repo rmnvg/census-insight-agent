@@ -2,10 +2,12 @@ import hashlib
 import json
 import os
 import resource
+import selectors
 import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,10 +20,56 @@ STREAM_LIMIT = 64 * 1024
 
 def _limits() -> None:
     resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-    resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
+    # macOS does not support this Linux address-space limit reliably. Production runs in
+    # Linux Docker with both RLIMIT_AS and the container memory limit; host runs are dev-only.
+    if sys.platform == "linux":
+        resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_FSIZE, (24 * 1024 * 1024, 24 * 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
     os.setsid()
+
+
+def _capture(process: subprocess.Popen[bytes], timeout: float) -> tuple[bytes, bytes, bool, bool]:
+    """Drain both pipes with bounded buffers, killing the process group on limit/deadline."""
+    streams = [bytearray(), bytearray()]
+    deadline = time.monotonic() + timeout
+    timed_out = exceeded = False
+    with selectors.DefaultSelector() as selector:
+        assert process.stdout is not None and process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ, 0)
+        selector.register(process.stderr, selectors.EVENT_READ, 1)
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    block = os.read(key.fd, 8192)
+                    if not block:
+                        selector.unregister(key.fileobj)
+                        continue
+                    buffer = streams[key.data]
+                    available = STREAM_LIMIT - len(buffer)
+                    buffer.extend(block[:available])
+                    if len(block) > available:
+                        exceeded = True
+                        break
+                if exceeded:
+                    break
+            if not timed_out and not exceeded:
+                try:
+                    process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+        finally:
+            if timed_out or exceeded or process.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
+    return bytes(streams[0]), bytes(streams[1]), timed_out, exceeded
 
 
 def _bounded(value: bytes) -> tuple[str, bool]:
@@ -69,13 +117,10 @@ def execute_request(request: ExecutionRequest, job_dir: Path) -> ExecutionResult
             stderr=subprocess.PIPE,
             preexec_fn=_limits,
         )
-        try:
-            stdout_bytes, stderr_bytes = process.communicate(timeout=request.timeout_seconds)
-        except subprocess.TimeoutExpired as error:
-            os.killpg(process.pid, signal.SIGKILL)
-            final_stdout, final_stderr = process.communicate()
-            stdout, stdout_truncated = _bounded((error.stdout or b"") + final_stdout)
-            stderr, stderr_truncated = _bounded((error.stderr or b"") + final_stderr)
+        stdout_bytes, stderr_bytes, timed_out, exceeded = _capture(process, request.timeout_seconds)
+        stdout, stdout_truncated = _bounded(stdout_bytes)
+        stderr, stderr_truncated = _bounded(stderr_bytes)
+        if timed_out:
             return ExecutionResult(
                 job_id=request.job_id,
                 status="failed",
@@ -89,9 +134,7 @@ def execute_request(request: ExecutionRequest, job_dir: Path) -> ExecutionResult
                 error_code="EXECUTION_TIMEOUT",
                 output_truncated=stdout_truncated or stderr_truncated,
             )
-        stdout, stdout_truncated = _bounded(stdout_bytes)
-        stderr, stderr_truncated = _bounded(stderr_bytes)
-        if stdout_truncated or stderr_truncated:
+        if exceeded or stdout_truncated or stderr_truncated:
             return ExecutionResult(
                 job_id=request.job_id,
                 status="failed",

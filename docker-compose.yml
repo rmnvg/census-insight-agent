@@ -30,11 +30,11 @@ services:
       WORKSPACE_ROOT: /app/workspace
       SKILLS_DIR: /app/skills
       AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-16}
-      AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-6}
+      AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-12}
       AGENT_MEMORY_TURN_THRESHOLD: ${AGENT_MEMORY_TURN_THRESHOLD:-12}
-      AGENT_PROVIDER_TIMEOUT_SECONDS: ${AGENT_PROVIDER_TIMEOUT_SECONDS:-60}
+      AGENT_PROVIDER_TIMEOUT_SECONDS: ${AGENT_PROVIDER_TIMEOUT_SECONDS:-90}
       AGENT_REQUEST_TIMEOUT_SECONDS: ${AGENT_REQUEST_TIMEOUT_SECONDS:-180}
-      AGENT_PROVIDER_MAX_RETRIES: ${AGENT_PROVIDER_MAX_RETRIES:-0}
+      AGENT_PROVIDER_MAX_RETRIES: ${AGENT_PROVIDER_MAX_RETRIES:-2}
       AGENT_ASSESSMENT_MAX_CHARACTERS: ${AGENT_ASSESSMENT_MAX_CHARACTERS:-12000}
       AGENT_ASSESSMENT_MAX_CHUNKS: ${AGENT_ASSESSMENT_MAX_CHUNKS:-12}
       LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
@@ -43,7 +43,7 @@ services:
       ARTIFACT_MAX_FILES: ${ARTIFACT_MAX_FILES:-8}
       ARTIFACT_MAX_TOTAL_BYTES: ${ARTIFACT_MAX_TOTAL_BYTES:-20971520}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - type: bind
         source: ${GOOGLE_CREDENTIALS_HOST_PATH:?Set GOOGLE_CREDENTIALS_HOST_PATH to an ADC JSON file}
@@ -74,7 +74,7 @@ services:
       CENSUS_UI_READ_TIMEOUT_SECONDS: ${CENSUS_UI_READ_TIMEOUT_SECONDS:-180}
       CENSUS_UI_MAX_ARTIFACT_BYTES: ${CENSUS_UI_MAX_ARTIFACT_BYTES:-10485760}
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     read_only: true
     user: "10002:10002"
     cap_drop:
@@ -105,6 +105,22 @@ services:
     networks:
       - frontend_api
 
+  queue-init:
+    build:
+      context: .
+      dockerfile: executor/Dockerfile
+    network_mode: none
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    command: [python, scripts/prepare_queue.py]
+    volumes:
+      - type: bind
+        source: ./workspace/execution-queue
+        target: /execution
+
   executor:
     build:
       context: .
@@ -131,12 +147,15 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    depends_on:
+      queue-init:
+        condition: service_completed_successfully
 
   qdrant:
     image: qdrant/qdrant:v1.15.4@sha256:6ac4807063bbecddca0250bfbcff52acf18c22263b904d12919349e6d0a408f1
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:

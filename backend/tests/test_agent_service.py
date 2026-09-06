@@ -721,3 +721,21 @@ def test_assessment_timeout_persists_failed_trace_and_preserves_memory(tmp_path:
     assert not retried.refusal
     assert model.context_sizes[-1][1] == 2
     assert service.get_trace(first.trace_id) is not None
+
+
+def test_overlapping_turns_share_the_latest_successful_checkpoint(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        model = FakeModel()
+        tools = FakeTools(SkillRegistry(tmp_path / "skills"))
+        service = AgentService(settings(tmp_path), model, cast(Any, tools))
+        session = await service.create_session()
+        first, second = await asyncio.gather(
+            service.chat(session.session_id, "What is Karnataka literacy?"),
+            service.chat(session.session_id, "How does that compare?"),
+        )
+        assert first.claims and second.claims
+        assert dict(model.context_sizes)["How does that compare?"] > 0
+        context = await service.get_context_status(session.session_id)
+        assert context.validated_turn_count == 2
+
+    asyncio.run(scenario())

@@ -4,6 +4,9 @@ Census Insight Agent is a citation-grounded assistant for three supplied Census 
 
 ## Capabilities and architecture
 
+For the shortest setup path, see **Reviewer quick start** below. See
+[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for the assignment-to-implementation map.
+
 - Grounded lookup, comparison, summary, source-follow-up, and inconsistency analysis
 - Mandatory dense + BM25 sparse retrieval fused by Qdrant RRF
 - Exact citation quotes with one-based physical PDF pages
@@ -39,6 +42,26 @@ flowchart LR
 ```
 
 ## Prerequisites and credentials
+
+### Reviewer quick start
+
+The submission ZIP includes the three original PDFs and supplied Markdown. A Git checkout requires
+copying those files into `data/source/` as described below. Credentials are never included.
+Vertex inference and first-time embeddings are billable.
+
+After completing the ADC and `.env` configuration below, run:
+
+```shell
+sh scripts/setup.sh --allow-paid-calls
+```
+
+This builds images, checks source-page coverage, initializes an empty index, prepares Linux queue
+permissions, and waits for healthy services. It preserves an existing valid collection. Open
+<http://localhost:8501>. Subsequent starts need only `docker compose up -d --wait`.
+The one-shot `queue-init` container exits successfully; the four application services stay running.
+Windows users should use WSL2 with Docker Desktop integration enabled.
+
+### Credentials
 
 For the complete application, install Docker Engine/Desktop with Compose v2 and the Google Cloud CLI. For host-side development, also install Python 3.12 and [`uv`](https://docs.astral.sh/uv/). The backend requires a Vertex-enabled GCP project and Application Default Credentials (ADC); API-key authentication is unsupported.
 
@@ -145,7 +168,7 @@ The real-corpus retrieval evaluator uses a paid Vertex query embedding and is ma
 docker compose exec backend uv run --frozen python evals/run_retrieval.py --cases evals/real_corpus_cases.json --output /app/data/processed/retrieval-evaluation-report.json
 ```
 
-The ten-case live harness is also manual, requires explicit consent, never retries `POST /chat`, and stores a sanitized report:
+The eleven-case live harness is also manual, requires explicit consent, never retries `POST /chat`, and stores a sanitized report:
 
 ```shell
 docker compose exec backend uv run --frozen python scripts/live_evaluation.py --allow-paid-calls --output /app/data/processed/live-evaluation-report.json
@@ -171,7 +194,7 @@ Trace IDs are allocated at request start and remain retrievable for typed failur
 - UI stays pending: rebuild frontend/backend and inspect their logs; `POST /chat` is intentionally not retried.
 - Backend unhealthy: verify ADC mount, project/location/model values, Qdrant, and executor heartbeat.
 
-Known limitations: excluded visual-page content, no token streaming, no URL-based browser session restoration, synchronous administrative ingestion, local Qdrant ports without TLS/auth, and development-grade executor isolation. See [DESIGN.md](DESIGN.md) and [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md).
+Known limitations: excluded visual-page content, no token streaming, no URL-based browser session restoration, synchronous administrative ingestion, loopback-only services without user authentication, and development-grade executor isolation. See [DESIGN.md](DESIGN.md) and [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md).
 
 ## Repository layout
 

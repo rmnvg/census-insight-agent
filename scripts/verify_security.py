@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Static, value-free audit of Compose trust-boundary controls."""
 
+import re
 from pathlib import Path
 
 
 def _service_block(compose: str, service: str, next_service: str | None) -> str:
+    del next_service
     start = compose.index(f"  {service}:\n")
-    end = (
-        compose.index(f"  {next_service}:\n", start)
-        if next_service
-        else compose.index("\nvolumes:")
-    )
+    following = re.search(r"\n(?:  [a-z][\w-]*:|[a-z][\w-]*:)", compose[start + 1 :])
+    end = start + 1 + following.start() if following else len(compose)
     return compose[start:end]
 
 

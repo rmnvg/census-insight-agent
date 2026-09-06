@@ -6,10 +6,12 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
 COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --extra executor --no-install-project
 COPY backend ./backend
 COPY executor ./executor
 COPY scripts/smoke_executor.py ./scripts/smoke_executor.py
 COPY scripts/verify_executor_runtime.py ./scripts/verify_executor_runtime.py
+COPY scripts/prepare_queue.py ./scripts/prepare_queue.py
 COPY scripts/replay_artifact_failure.py ./scripts/replay_artifact_failure.py
 COPY backend/tests/fixtures/prompt5_failed_candidates.json ./backend/tests/fixtures/prompt5_failed_candidates.json
 RUN uv sync --frozen --no-dev --extra executor \

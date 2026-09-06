@@ -4,6 +4,33 @@ The binding platform decisions are summarized in [docs/DECISIONS.md](docs/DECISI
 
 ## System architecture
 
+### Submission hardening
+
+The supported deployment is one backend process with a local filesystem and local Docker Compose.
+Per-session locks serialize overlapping turns through checkpoint and trace persistence. Multiple API
+workers would require a shared session lock or optimistic checkpoint versioning; they are deliberately
+not enabled. Separate sessions can still run concurrently.
+
+Numeric table quotes bind values to row labels and column headers. A semantic assessment must classify
+every source claim exactly once; missing or conflicting assessments trigger repair/refusal. These checks
+reduce false support but are not a universal parser for every PDF table layout. Difficult layouts can
+still cause a safe refusal. Original PDF pages remain authoritative.
+
+Ingestion fingerprints the full extracted chunk content and metadata in addition to the PDF checksum,
+so corrected Markdown with the same chunk count cannot silently leave stale vectors. Legacy ingestion
+state without this fingerprint is refreshed on the next explicit ingestion.
+
+Published service ports bind to loopback. HTTP administrative ingestion is disabled by default; the CLI
+is the supported ingestion path. There is no multi-user authentication: do not expose these services
+publicly without an authenticated gateway. The `queue-init` one-shot container receives only the queue
+mount, no network or credentials, and prepares permissions for UID 10001 on Linux.
+
+The executor drains stdout and stderr into bounded buffers and kills the process group on overflow.
+A separate heartbeat remains current during execution. Linux enforces address-space limits plus the
+Docker memory limit. macOS development runs omit unsupported `RLIMIT_AS`; production execution uses
+the isolated Linux container. The single worker can queue jobs, but busy queues may exceed a request's
+bounded result deadline; another day would add queue admission control and stale-job recovery.
+
 ```mermaid
 flowchart LR
   subgraph Presentation

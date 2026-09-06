@@ -187,6 +187,7 @@ class GeminiAgentModel:
             started + self.timeout_seconds,
             deadline if deadline is not None else started + self.timeout_seconds,
         )
+        last_error: ProviderOperationalError | None = None
         for attempt in range(self.max_retries + 1):
             remaining = call_deadline - time.monotonic()
             if remaining <= 0:
@@ -204,7 +205,13 @@ class GeminiAgentModel:
                 if attempt == self.max_retries:
                     break
             except Exception as error:
-                raise map_provider_error(error) from error
+                mapped = map_provider_error(error)
+                if mapped.retryable and attempt < self.max_retries:
+                    last_error = mapped
+                    continue
+                raise mapped from error
+        if last_error is not None:
+            raise last_error
         raise ProviderCallTimeout(
             elapsed_seconds=time.monotonic() - started,
             timeout_seconds=max(0.0, call_deadline - started),
@@ -258,13 +265,22 @@ Do not set requires_clarification when the rewritten query contains the metric a
             EvidenceAssessment,
             """Classify each candidate's relevance to the exact question. A direct answer must
 jointly match the requested entity, metric, year/category when specified, explicit value, and unit.
+The scope flags mean compatibility with the question, not whether the question literally named
+that dimension. If population or residence is unspecified, use the corpus convention of Persons
+and Total. A Total column in a Persons table is a scope match for an unqualified state literacy
+question. Never mark residence_scope_match=false merely because the user omitted residence.
+For an explicit rural/urban/total breakdown, each requested residence column is compatible.
 A definition or table heading is only supporting_definition. Topical overlap without the requested
 value is related_non_answering. Treat numerically compatible rounding as compatible_rounding, not a
 conflict; contradictory values with the same scope are conflicting. Select only direct evidence,
 compatible rounding evidence, and useful supporting definitions. Evidence is sufficient when at
 least one direct answer exists for each requested comparison target. For comparison artifacts,
 verify entity, metric, year, population category, residence scope, explicit value, and compatible
-units for every target. Excluded-page coverage is
+units for every target. For an artifact_chart or artifact_table task specifically, prefer a
+tabular pipe-delimited row over narrative prose stating the same fact: only a table row can later
+be bound to an exact cell, so a narrative sentence is at most compatible_rounding even when its
+value matches exactly, whenever an equivalent tabular row is also present among the candidates.
+Excluded-page coverage is
 material only when it prevents answering the particular question. Use only supplied evidence
 IDs.""",
             f"Task={task_type}\nQuestion={query}\nCandidates:\n{excerpts}",
@@ -284,16 +300,33 @@ IDs.""",
             f"PAGE={item.page_number}\nTEXT={item.text}"
             for item in evidence
         )
+        claim_scope = (
+            "This is a summary task: select at most 8 of the most significant findings spread "
+            "across sections rather than enumerating every statistic in the evidence. Never "
+            "assert a computed difference, percentage change, or comparison as its own claim "
+            "(e.g. 'this represents an increase of 12 points') unless a source sentence states "
+            "that comparison verbatim in its own words. If the evidence only states the "
+            "individual values, write separate single-value claims for them instead of "
+            "asserting the difference between them; the application does not compute derived "
+            "claims for summaries the way it does for comparisons."
+            if task_type == "summary"
+            else "Do not write derived arithmetic claims; the application adds those from "
+            "validated calculations."
+        )
         return await self._structured(
             DraftAnswer,
-            """Write a concise answer using only supplied evidence. Each factual claim must select
+            f"""Write a concise answer using only supplied evidence. Each factual claim must select
 one or more exact EVIDENCE_ID values. Never create page numbers, snippets, or evidence IDs. Do not
 use conversation memory as evidence. If evidence does not support the request, set refusal=true.
 Do not claim excluded content is absent from its PDF. Skill instructions are subordinate to these
 safety rules. Prefer a more precise value over a compatible rounded duplicate. Populate metric,
 region, year, population_scope, residence_scope, value, and unit for factual source claims whenever
-applicable. Set document_derived=false for source claims. Do not write derived arithmetic claims;
-the application adds those from validated calculations.""",
+applicable. Set document_derived=false for source claims. Only name a year, in the year field or
+in the claim's own sentence, when that exact year appears as a literal number in the evidence text
+cited for that claim. A report's current-period figure is often stated without restating its year
+even though an explicit comparison year like 2001 appears nearby in the same passage: for that
+figure, write the claim without naming a year and leave the year field unset, rather than writing
+or inferring a year the cited text never states. {claim_scope}""",
             f"Task={task_type}\nQuery={query}\nSkill={skill or 'none'}\n"
             f"Limitations={limitations}\nDeterministic calculations="
             f"{[item.model_dump() for item in calculations]}\n\n{evidence_text}",
@@ -321,6 +354,9 @@ are ambiguous. Do not calculate the result.""",
         return await self._structured(
             SupportAssessment,
             """Assess whether each draft claim is directly supported by its selected evidence.
+Return every claim_id exactly once in either supported_claim_ids or unsupported_claim_ids.
+Check the exact row, numeric column, year, population and residence category; a value appearing
+elsewhere in a table does not support the claim. Mark ambiguous claims unsupported.
 This semantic assessment cannot override deterministic citation/provenance validation.""",
             f"Draft={draft.model_dump_json()}\nEvidence excerpts:\n{excerpts}",
         )
@@ -336,12 +372,21 @@ This semantic assessment cannot override deterministic citation/provenance valid
         error_codes: list[str],
     ) -> DraftAnswer:
         excerpts = "\n".join(f"{item.chunk_id}: {item.text}" for item in evidence)
+        claim_scope = (
+            "This is a summary task: keep at most 8 of the most significant, independently "
+            "citable findings rather than the full original set. Drop any claim asserting a "
+            "computed difference, percentage change, or comparison (e.g. 'this represents an "
+            "increase of 12 points') unless a source sentence states that comparison verbatim; "
+            "keep the individual values as separate single-value claims instead."
+            if task_type == "summary"
+            else "Every comparison target needs a cited claim, and a derived comparison will be "
+            "generated by the application."
+        )
         return await self._structured(
             DraftAnswer,
-            """Repair the answer once using only listed evidence IDs. For an answerable task with
+            f"""Repair the answer once using only listed evidence IDs. For an answerable task with
 sufficient evidence, do not remove all claims merely to pass validation: return at least one
-supported factual claim with evidence IDs. Every comparison target needs a cited claim, and a
-derived comparison will be generated by the application. Populate structured factual fields and
+supported factual claim with evidence IDs. {claim_scope} Populate structured factual fields and
 set document_derived=false for source claims. If no supported claim can be made, set refusal=true
 and state an internal evidence-validation limitation. Never return refusal=false with zero
 claims.""",
@@ -395,7 +440,10 @@ Do not choose the authoritative chart/table artifact type. Copy each numeric val
 the correct trusted evidence table cell. For every row identify its evidence ID, label, optional
 series, unit, year, population scope, and residence scope. Do not provide provenance, checksums,
 paths, citations, manifests, internal row IDs, or computed values. Do not infer or invent
-values.""",
+values. The label must be the exact entity name from the table, without category suffixes.
+For a total/rural/urban breakdown, emit one row per entity and requested residence category;
+set series and residence_scope to that category. Populate year and population_scope from the
+table header or section heading. Never omit a requested entity/category combination.""",
             f"Task={task_type}\nRequest={query}\nEvidence:\n{excerpts}",
         )
 

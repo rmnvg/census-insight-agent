@@ -7,7 +7,16 @@ from backend.app.agent.models import DraftClaim, EvidenceSpan
 from backend.app.retrieval.models import RetrievedEvidence
 
 CITATION_QUOTE_MAX_CHARS = 1600
-CATEGORY_TERMS = {"total", "rural", "urban", "male", "males", "female", "females", "persons"}
+# Every document in this corpus is exclusively a Census 2011 report (see README/DESIGN.md); used
+# only as the implicit year for a sentence that states no year at all (see quote_rejection_reason).
+_CORPUS_DEFAULT_YEAR = 2011
+# "total" is deliberately excluded: it is this corpus's documented default residence scope (see
+# DESIGN.md's "Total persons" convention), so source prose routinely omits it for the baseline
+# case (e.g. "the number of literates" rather than "the total number of literates") while a
+# claim may naturally include the word as ordinary English ("the total number of X") without
+# asserting a Census-specific scope at all. Rural/urban/male/female/persons are genuine
+# deviations from that default and must still be confirmed present in the trusted context.
+CATEGORY_TERMS = {"rural", "urban", "male", "males", "female", "females", "persons"}
 METRIC_TERMS = {"literacy", "population", "density", "worker", "workers", "ratio", "growth"}
 _HTML_TAG = re.compile(r"<[^>]+>")
 
@@ -38,6 +47,90 @@ def _years(value: str) -> set[int]:
     return {int(number) for number in _number_values(value) if 1900 <= number <= 2099}
 
 
+def _table_cell_supports(claim: DraftClaim, quote: str) -> bool:
+    """Bind numeric claims to a row and column, rather than all words in the quoted table.
+
+    Explicit table categories override document context. Blank multi-level headers inherit the
+    preceding heading within that header row. Prose remains subject to semantic assessment.
+    """
+    rows = [
+        [_plain(cell).strip() for cell in line.strip().strip("|").split("|")]
+        for line in quote.splitlines()
+        if line.strip().startswith("|")
+    ]
+    values = (
+        {claim.value}
+        if claim.value is not None
+        else _number_values(claim.text) - _years(claim.text)
+    )
+    if not rows or not values:
+        return True
+    population = _tokens(claim.population_scope or claim.text) & {
+        "persons",
+        "male",
+        "female",
+        "males",
+        "females",
+    }
+    residence = _tokens(claim.residence_scope or claim.text) & {"total", "rural", "urban"}
+    expected_years = {claim.year} if claim.year else _years(claim.text)
+    headers: list[list[str]] = []
+    for row in rows:
+        if all(re.fullmatch(r"[:\-\s]*", cell) for cell in row):
+            continue
+        numeric = set().union(*(_number_values(cell) for cell in row))
+        # Column ordinal rows (1, 2, 3...) are layout metadata, never evidence values.
+        if [cell for cell in row if cell] == [str(i + 1) for i in range(len(row))]:
+            continue
+        if not numeric or numeric <= _years(" ".join(row)):
+            headers.append(row)
+            continue
+        row_labels = " ".join(cell for cell in row if not _number_values(cell))
+        for column, cell in enumerate(row):
+            if not values <= _number_values(cell):
+                continue
+            column_headers = []
+            for header in headers:
+                inherited = ""
+                for part in header[: column + 1]:
+                    if part:
+                        inherited = part
+                column_headers.append(inherited)
+            context = " ".join([row_labels, *column_headers])
+            context_tokens = _tokens(context)
+            context_tokens |= {word.rstrip("s") for word in context_tokens}
+            all_tokens = _tokens(quote)
+            if (
+                population
+                and all_tokens & {"persons", "male", "female", "males", "females"}
+                and not {word.rstrip("s") for word in population} <= context_tokens
+            ):
+                continue
+            if (
+                residence
+                and all_tokens & {"total", "rural", "urban"}
+                and not residence <= context_tokens
+            ):
+                continue
+            cell_years = _years(" ".join(column_headers))
+            # A row's year label is authoritative when years run vertically.
+            row_years = _years(" ".join(row[:column]))
+            if (
+                expected_years
+                and (cell_years or row_years)
+                and not expected_years <= cell_years | row_years
+            ):
+                continue
+            if (
+                claim.region
+                and _tokens(claim.region) <= all_tokens
+                and not _tokens(claim.region) <= _tokens(row_labels)
+            ):
+                continue
+            return True
+    return False
+
+
 def quote_rejection_reason(
     claim: DraftClaim, quote: str, evidence: RetrievedEvidence
 ) -> str | None:
@@ -46,6 +139,8 @@ def quote_rejection_reason(
         return "EMPTY_QUOTE"
     if quote not in evidence.text:
         return "NON_CONTIGUOUS_QUOTE"
+    if not _table_cell_supports(claim, quote):
+        return "TABLE_CELL_SCOPE_MISMATCH"
 
     claim_numbers = {number for number in _number_values(claim.text) if not 1900 <= number <= 2099}
     expected_values = {claim.value} if claim.value is not None else claim_numbers
@@ -56,7 +151,17 @@ def quote_rejection_reason(
         return "VALUE_ABSENT"
 
     expected_years = {claim.year} if claim.year is not None else _years(claim.text)
-    if expected_years and not expected_years <= _years(quote):
+    quote_years = _years(quote)
+    # A sentence stating no year at all (quote_years empty) is treated as this corpus's
+    # sole/default report year: every document here is exclusively a Census 2011 report, so a
+    # figure's current-period sentence routinely omits the year even when an explicit comparison
+    # year like 2001 appears elsewhere in the same passage (see DESIGN.md/hydration.py's
+    # identical "2011 total persons" default for artifacts). This is narrower than it looks: it
+    # only ever applies when the sentence names no year at all. A sentence naming any year still
+    # must include the expected one — quote_years={2001} still correctly rejects an
+    # expected_years={2011} claim, so a genuinely wrong-year sentence is never accepted here.
+    implicit_corpus_year = not quote_years and expected_years == {_CORPUS_DEFAULT_YEAR}
+    if expected_years and not expected_years <= quote_years and not implicit_corpus_year:
         return "YEAR_ABSENT"
 
     quote_tokens = _tokens(quote)
@@ -75,7 +180,14 @@ def quote_rejection_reason(
         return "METRIC_ABSENT"
 
     if claim.population_scope:
-        population_supported = _tokens(claim.population_scope) <= trusted_context_tokens
+        scope_tokens = _tokens(claim.population_scope)
+        if "children" in scope_tokens:
+            # "children" is the natural way to phrase the 0-6-years population category, but
+            # Census source prose consistently says "child sex ratio" (singular); this is a
+            # morphological variant, not a different assertion, so it must not require the
+            # source to literally say "children".
+            scope_tokens = (scope_tokens - {"children"}) | {"child"}
+        population_supported = scope_tokens <= trusted_context_tokens
         if claim.population_scope.casefold() == "persons":
             population_supported = (
                 population_supported
@@ -182,6 +294,9 @@ def select_evidence_span_with_diagnostic(
             rejection_codes.append("QUOTE_TOO_LONG")
             continue
         quote = evidence.text[start:end]
+        if quote.lstrip().startswith("|"):
+            # A bare row loses its column headers; it cannot bypass table validation.
+            continue
         reason = quote_rejection_reason(claim, quote, evidence)
         if reason is None:
             score = len(claim_tokens & _tokens(quote))
@@ -204,6 +319,7 @@ def select_evidence_span_with_diagnostic(
         (
             code
             for code in (
+                "TABLE_CELL_SCOPE_MISMATCH",
                 "VALUE_ABSENT",
                 "YEAR_ABSENT",
                 "METRIC_ABSENT",

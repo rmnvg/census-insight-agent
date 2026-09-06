@@ -41,8 +41,16 @@ def artifact_response(
     claims = [
         AnswerClaim(
             claim_id=f"artifact-source-{index}",
-            text=f"{source.row_id} {source.field}: {source.raw_value} {source.unit or ''}".strip(),
+            text=(
+                f"{source.region} — {source.metric}, {source.residence_scope} "
+                f"{source.population_scope}, {source.year}: {source.raw_value} {source.unit or ''}"
+            ),
             citation_ids=[citation_by_source[source.source_record_id]],
+            metric=source.metric,
+            region=source.region,
+            year=source.year,
+            population_scope=source.population_scope,
+            residence_scope=source.residence_scope,
             value=source.normalized_numeric_value,
             unit=cast(
                 ClaimUnit,

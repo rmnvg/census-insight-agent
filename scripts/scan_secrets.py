@@ -37,10 +37,19 @@ def _scan(path: str, content: bytes) -> list[tuple[str, str]]:
 
 def scan_tracked() -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
-    if shutil.which("git"):
+    in_repository = (
+        bool(shutil.which("git"))
+        and subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, check=False
+        ).returncode
+        == 0
+    )
+    if in_repository:
         paths = [
             item.decode("utf-8", "replace")
-            for item in _run("git", "ls-files", "-z").split(b"\0")
+            for item in _run(
+                "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"
+            ).split(b"\0")
             if item
         ]
     else:
@@ -53,6 +62,7 @@ def scan_tracked() -> list[tuple[str, str]]:
             ".mypy_cache",
             ".ruff_cache",
             "__pycache__",
+            "submission",
         }
         paths = [
             str(path)

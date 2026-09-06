@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 htmlcov/
 .coverage
+submission/
 *.ses
 *.log
 *.tmp
