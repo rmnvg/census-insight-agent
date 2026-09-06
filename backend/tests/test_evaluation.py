@@ -36,6 +36,7 @@ def test_retrieval_evaluation_measures_metrics_and_safety() -> None:
         section_path=["Population"],
         extraction_method="provided_markdown",
         coverage_status="indexed_provided_markdown",
+        source_checksum="a" * 64,
         retrieval_score=1.0,
     )
     response = RetrievalSearchResponse(

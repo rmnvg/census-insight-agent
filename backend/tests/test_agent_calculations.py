@@ -20,6 +20,7 @@ def rate_evidence(region: str, value: float) -> RetrievedEvidence:
         section_path=["Literates and Literacy Rate by residence : 2011 (PERSONS)"],
         extraction_method="provided_markdown",
         coverage_status="indexed_provided_markdown",
+        source_checksum="a" * 64,
         retrieval_score=1.0,
     )
 

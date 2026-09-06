@@ -9,8 +9,8 @@ class AgentOperationalError(RuntimeError):
         node: str,
         message: str,
         retryable: bool,
-        elapsed_seconds: float,
-        configured_timeout_seconds: float,
+        elapsed_seconds: float | None,
+        configured_timeout_seconds: float | None,
         retry_count: int,
         diagnostics: Mapping[str, object] | None = None,
     ) -> None:

@@ -8,9 +8,15 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock README.md ./
 COPY backend ./backend
 COPY executor ./executor
-RUN uv sync --frozen --no-dev
+COPY scripts/smoke_executor.py ./scripts/smoke_executor.py
+COPY scripts/verify_executor_runtime.py ./scripts/verify_executor_runtime.py
+COPY scripts/replay_artifact_failure.py ./scripts/replay_artifact_failure.py
+COPY backend/tests/fixtures/prompt5_failed_candidates.json ./backend/tests/fixtures/prompt5_failed_candidates.json
+RUN uv sync --frozen --no-dev --extra executor \
+    && addgroup --system --gid 10001 executor \
+    && adduser --system --uid 10001 --ingroup executor --no-create-home executor
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-EXPOSE 8001
-CMD ["uvicorn", "executor.main:app", "--host", "0.0.0.0", "--port", "8001"]
+USER 10001:10001
+CMD ["python", "-m", "executor.worker", "--root", "/execution"]

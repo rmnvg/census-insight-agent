@@ -38,6 +38,10 @@ services:
       AGENT_ASSESSMENT_MAX_CHARACTERS: ${AGENT_ASSESSMENT_MAX_CHARACTERS:-12000}
       AGENT_ASSESSMENT_MAX_CHUNKS: ${AGENT_ASSESSMENT_MAX_CHUNKS:-12}
       LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
+      EXECUTION_QUEUE_ROOT: /app/workspace/execution-queue
+      ARTIFACT_EXECUTION_TIMEOUT_SECONDS: ${ARTIFACT_EXECUTION_TIMEOUT_SECONDS:-30}
+      ARTIFACT_MAX_FILES: ${ARTIFACT_MAX_FILES:-8}
+      ARTIFACT_MAX_TOTAL_BYTES: ${ARTIFACT_MAX_TOTAL_BYTES:-20971520}
     ports:
       - "8000:8000"
     volumes:
@@ -53,6 +57,8 @@ services:
         target: /app/workspace
     depends_on:
       qdrant:
+        condition: service_healthy
+      executor:
         condition: service_healthy
 
   frontend:
@@ -71,10 +77,25 @@ services:
     build:
       context: .
       dockerfile: executor/Dockerfile
-    ports:
-      - "8001:8001"
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=128m,noexec,nosuid,nodev
+    volumes:
+      - type: bind
+        source: ./workspace/execution-queue
+        target: /execution
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test: ["CMD", "python", "-c", "import json,time,pathlib; p=pathlib.Path('/execution/heartbeat.json'); assert p.is_file() and time.time()-p.stat().st_mtime < 10"]
       interval: 10s
       timeout: 3s
       retries: 5

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -87,13 +88,16 @@ class AgentTools:
             payload = by_id[evidence_id]
             reference = expected[evidence_id]
             actual_chunk_id = str(payload.get("chunk_id", ""))
-            actual_checksum = str(payload.get("source_checksum", ""))
+            actual_checksum = payload.get("source_checksum")
             mismatch = (
                 actual_chunk_id != evidence_id
                 or payload.get("document_id") != reference.document_id
                 or payload.get("page_number") != reference.page_number
+                or not isinstance(actual_checksum, str)
+                or re.fullmatch(r"[0-9a-f]{64}", actual_checksum) is None
                 or (
-                    bool(reference.source_checksum) and actual_checksum != reference.source_checksum
+                    reference.source_checksum is not None
+                    and actual_checksum != reference.source_checksum
                 )
             )
             if mismatch:

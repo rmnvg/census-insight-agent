@@ -5,6 +5,12 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
+from backend.app.execution.contracts import (
+    ArtifactDataset,
+    ArtifactDescriptor,
+    ExecutionRequest,
+    ExecutionResult,
+)
 from backend.app.retrieval.models import RetrievedEvidence
 
 TaskType = Literal[
@@ -20,12 +26,25 @@ TaskType = Literal[
 ]
 
 
+class ArtifactDataRequirement(BaseModel):
+    """Source-data requirement for an artifact, separate from its presentation intent."""
+
+    artifact_type: Literal["chart", "table"]
+    metric: str = Field(min_length=1)
+    year: int | None = Field(default=None, ge=1800, le=2200)
+    regions: list[str] = Field(default_factory=list)
+    population_scope: str | None = None
+    residence_scope: str | None = None
+    comparison: bool = False
+
+
 class TaskClassification(BaseModel):
     task_type: TaskType
     regions: list[str] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list)
     referent: str | None = None
     clarification_question: str | None = None
+    artifact_requirement: ArtifactDataRequirement | None = None
     reason: str = Field(min_length=1)
 
 
@@ -36,6 +55,7 @@ class ResolvedQuery(BaseModel):
     task_type: TaskType | None = None
     regions: list[str] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list)
+    artifact_requirement: ArtifactDataRequirement | None = None
 
 
 EvidenceRelevance = Literal[
@@ -56,6 +76,9 @@ class EvidenceAssessmentItem(BaseModel):
     year_match: bool
     has_explicit_value: bool
     has_unit: bool
+    population_scope_match: bool = True
+    residence_scope_match: bool = True
+    unit_compatible: bool = True
     reason: str
 
 
@@ -183,7 +206,7 @@ class ValidatedClaimRecord(BaseModel):
     citation_ids: list[str] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list)
     page_numbers: list[int] = Field(default_factory=list)
-    source_checksums: list[str] = Field(default_factory=list)
+    source_checksums: list[str | None] = Field(default_factory=list)
 
 
 class ValidatedClaimTurn(BaseModel):
@@ -196,7 +219,7 @@ class EvidenceReference(BaseModel):
     evidence_id: str
     document_id: str
     page_number: int = Field(gt=0)
-    source_checksum: str = ""
+    source_checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ArtifactResult(BaseModel):
@@ -209,7 +232,7 @@ class AgentResponse(BaseModel):
     answer_markdown: str = Field(serialization_alias="answer")
     claims: list[AnswerClaim] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
-    artifacts: list[ArtifactResult] = Field(default_factory=list)
+    artifacts: list[ArtifactResult | ArtifactDescriptor] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     refusal: bool = False
     trace_id: str
@@ -274,6 +297,7 @@ class AgentState(TypedDict, total=False):
     resolved_query: str
     task_type: TaskType
     classification: TaskClassification
+    artifact_requirement: ArtifactDataRequirement | None
     selected_skill: str | None
     skill_instructions: str | None
     plan: AgentPlan
@@ -288,7 +312,7 @@ class AgentState(TypedDict, total=False):
     answer_claims: list[AnswerClaim]
     citations: list[Citation]
     limitations: list[str]
-    artifacts: list[ArtifactResult]
+    artifacts: list[ArtifactResult | ArtifactDescriptor]
     tool_calls: list[ToolCallRecord]
     errors: list[str]
     retry_count: int
@@ -296,6 +320,13 @@ class AgentState(TypedDict, total=False):
     trace_events: list[TraceEvent]
     conversation_summary: str
     calculations: list[CalculationResult]
+    artifact_dataset: ArtifactDataset | None
+    generated_code: str | None
+    execution_request: ExecutionRequest | None
+    execution_result: ExecutionResult | None
+    artifact_descriptors: list[ArtifactDescriptor]
+    artifact_attempt: int
+    artifact_errors: list[str]
     validated_claim_history: list[ValidatedClaimTurn]
     source_support_claims: list[ValidatedClaimRecord]
     checkpoint_schema_version: int

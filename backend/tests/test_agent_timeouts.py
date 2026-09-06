@@ -49,6 +49,7 @@ def test_provider_deadline_bounds_one_retry_and_cancels_work() -> None:
     assert runnable.calls == 2
     assert runnable.cancellations == 2
     assert caught.value.retry_count == 1
+    assert caught.value.elapsed_seconds is not None
     assert caught.value.elapsed_seconds < 0.1
 
 

@@ -15,6 +15,7 @@ def evidence(**updates: object) -> RetrievedEvidence:
         "section_path": ["Literacy"],
         "extraction_method": "provided_markdown",
         "coverage_status": "indexed_provided_markdown",
+        "source_checksum": "a" * 64,
         "retrieval_score": 1.0,
     }
     values.update(updates)

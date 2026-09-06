@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     agent_provider_max_retries: int = 0
     agent_assessment_max_characters: int = 12_000
     agent_assessment_max_chunks: int = 12
+    execution_queue_root: Path = Path("workspace/execution-queue")
+    artifact_execution_timeout_seconds: float = Field(default=30, gt=0, le=60)
+    artifact_max_files: int = Field(default=8, ge=1, le=8)
+    artifact_max_total_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
 
     @model_validator(mode="after")
     def validate_vertex_configuration(self) -> "Settings":

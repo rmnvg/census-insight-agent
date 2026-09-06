@@ -26,5 +26,6 @@ These instructions apply to the entire repository.
 
 ## Current scope
 
-The repository contains Vertex AI providers, citation-safe ingestion, Qdrant hybrid retrieval, and
-the citation-grounded LangGraph conversational agent. Artifact execution remains deferred.
+The repository contains Vertex AI providers, citation-safe ingestion, Qdrant hybrid retrieval, the
+citation-grounded LangGraph conversational agent, and an isolated artifact executor. The executor
+has no network or cloud credentials and communicates only through its filesystem queue.

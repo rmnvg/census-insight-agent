@@ -26,6 +26,11 @@ from backend.app.agent.service import AgentChatError, AgentService
 from backend.app.agent.skills import SkillRegistry
 from backend.app.agent.tools import AgentTools, ArithmeticInput
 from backend.app.config import Settings
+from backend.app.execution.contracts import (
+    ArtifactDataset,
+    ArtifactDatasetProposal,
+    GeneratedProgram,
+)
 from backend.app.retrieval.models import RetrievedEvidence
 
 
@@ -180,6 +185,29 @@ class FakeModel:
     async def summarize_memory(self, context: list[Any]) -> str:
         del context
         return "Open user referent only; no source facts retained."
+
+    async def propose_artifact_dataset(
+        self, query: str, task_type: str, evidence: list[RetrievedEvidence]
+    ) -> ArtifactDatasetProposal:
+        del query, task_type, evidence
+        raise AssertionError("Artifact dataset generation was not expected")
+
+    async def generate_artifact_code(
+        self, dataset: ArtifactDataset, skill: str
+    ) -> GeneratedProgram:
+        del dataset, skill
+        raise AssertionError("Artifact code generation was not expected")
+
+    async def repair_artifact_code(
+        self,
+        dataset: ArtifactDataset,
+        code: str,
+        skill: str,
+        error_code: str,
+        stderr: str,
+    ) -> GeneratedProgram:
+        del dataset, code, skill, error_code, stderr
+        raise AssertionError("Artifact code repair was not expected")
 
 
 class RepairingModel(FakeModel):

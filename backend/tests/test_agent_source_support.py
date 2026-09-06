@@ -79,6 +79,7 @@ def comparison(run_id: str = "comparison") -> ValidatedClaimTurn:
 
 
 def payload(reference: EvidenceReference) -> dict[str, Any]:
+    assert reference.source_checksum is not None
     region = reference.document_id.removeprefix("doc-").title()
     value = 75.36 if region == "Karnataka" else 72.9
     text = f"The literacy rate for total persons in {region} was {value}% in 2011."
@@ -173,8 +174,7 @@ def test_missing_or_checksum_changed_evidence_is_rejected(tmp_path: Path, failur
 def test_public_calculation_rounding_has_no_binary_float_residue() -> None:
     assert rounded_subtraction(72.9, 75.36) == -2.46
     assert (
-        AgentTools.calculate(ArithmeticInput(operation="difference", values=[72.9, 75.36]))
-        == -2.46
+        AgentTools.calculate(ArithmeticInput(operation="difference", values=[72.9, 75.36])) == -2.46
     )
     derivation = comparison().claims[-1].derivation
     assert derivation is not None

@@ -151,7 +151,9 @@ requires every result to obey its requested document or region filter.
 Audit every stored point, payload, and named vector without changing Qdrant:
 
 ```shell
-docker compose run --rm --no-deps backend uv run --frozen python -m backend.app.retrieval.validation --expected-points 2058
+docker compose run --rm --no-deps backend uv run --frozen python -m backend.app.retrieval.validation \
+  --expected-points 2058 \
+  --output /app/data/processed/qdrant-validation-report.json
 ```
 
 Inspect a single hybrid query and all three diagnostic rankings:
@@ -195,7 +197,7 @@ curl http://localhost:8000/runs/TRACE_ID/trace
 Check session metadata with `GET /sessions/{session_id}`. Checkpoints persist in
 `workspace/checkpoints.sqlite`; run traces persist under
 `workspace/sessions/{session_id}/traces/{run_id}.json`. Neither contains credentials or vectors.
-New checkpoints carry schema version 3 and store application state as JSON-safe primitives,
+New checkpoints carry schema version 4 and store application state as JSON-safe primitives,
 including a bounded history of validated claim metadata. Pre-v3 successful traces are migrated
 without treating assistant prose as evidence.
 
@@ -243,5 +245,85 @@ user message once after inspecting the failed trace; the failed attempt is not d
 conversation context.
 
 Runtime Markdown skills are read only from `skills/`. Summary and inconsistency skills guide the
-agent; chart and table requests return `capability_pending`. Code execution and artifact rendering
-remain pending for Prompt 5.
+agent. Chart and table skills guide task-specific Python generation after a citation-safe dataset is
+validated.
+
+## Isolated chart and table artifacts
+
+The backend submits typed JSON jobs atomically under `workspace/execution-queue/`. A dedicated
+non-root executor claims jobs by rename, validates generated Python's AST, runs it with process and
+output limits, validates every declared output, and returns a typed result through the same queue.
+The executor has no network, host port, Docker socket, ADC mount, Google environment variables,
+Qdrant connection, or access to session directories. Its root filesystem is read-only; only `/tmp`
+and the narrowly scoped queue are writable.
+
+Accepted artifacts are moved into:
+
+```text
+workspace/sessions/{session_id}/artifacts/{artifact_id}/
+├── artifact.json
+├── generated.py
+├── input.json
+├── execution-result.json
+├── source-manifest.json
+└── chart.png / plotted-data.csv / table.csv / table.md
+```
+
+Generated code remains locally inspectable but is never served by the public API. List and download
+validated artifacts with:
+
+```shell
+curl http://localhost:8000/sessions/SESSION_ID/artifacts
+curl http://localhost:8000/sessions/SESSION_ID/artifacts/ARTIFACT_ID
+curl -OJ http://localhost:8000/sessions/SESSION_ID/artifacts/ARTIFACT_ID/files/table.csv
+curl http://localhost:8000/health/executor
+```
+
+Build and run the offline executor tests without Gemini:
+
+```shell
+docker compose build executor
+docker compose run --rm --no-deps executor python scripts/verify_executor_runtime.py
+docker compose up -d executor
+docker compose run --rm --no-deps backend uv run --frozen python scripts/smoke_executor_handoff.py
+```
+
+Replay the Prompt 5 comparison-packing failure and execute its synthetic approved dataset entirely
+offline. The fixture preserves the failed ten-candidate ordering but contains no production Census
+values:
+
+```shell
+docker compose build executor
+docker compose run --rm --no-deps executor python scripts/replay_artifact_failure.py
+```
+
+Gemini receives only a small semantic `ArtifactDatasetProposal`; authoritative chart/table identity
+is omitted and comes from the validated application requirement. Gemini never receives the strict
+internal dataset, source manifest, checksums, paths, or execution protocol. Inspect the deterministic
+schema-complexity guard with:
+
+```shell
+uv run --frozen python scripts/report_artifact_schema.py \
+  --output docs/artifact-schema-complexity.json
+```
+
+After starting Qdrant, the backend, and executor, replay trusted existing comparison evidence
+through proposal hydration and the isolated executor without Gemini, embeddings, or Qdrant writes:
+
+```shell
+docker compose run --rm --no-deps backend uv run --frozen python \
+  scripts/replay_artifact_proposal.py \
+  --session-id 98194e7f49d4468f823359f020522028 \
+  --trace-id 0a4cdb00-c807-47a0-8635-648f1bdf5147 \
+  --output data/processed/artifact-proposal-offline-replay.json
+```
+
+For multi-region artifacts, the backend performs one region-filtered data search per target. It
+reserves direct, value-bearing evidence for each target within the existing assessment budget before
+adding supporting candidates. Generic excluded-visual limitations are shown only when an excluded
+page is material to the requested data; safe indexed statewide tables take precedence.
+
+Container isolation and AST filtering reduce risk but are not a hardened multi-tenant sandbox.
+Resource controls vary by Docker host, AST policy cannot prove program intent, and a production
+multi-tenant deployment should use stronger per-job isolation such as microVMs or a dedicated
+sandbox runtime.

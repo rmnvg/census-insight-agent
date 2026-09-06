@@ -1,0 +1,87 @@
+{
+  "rejected_llm_facing_schema": {
+    "model": "ArtifactDataset",
+    "serialized_characters": 3130,
+    "definition_count": 2,
+    "definitions": [
+      "ComputedValue",
+      "SourceRecord"
+    ],
+    "maximum_nesting_depth": 8,
+    "formats": [],
+    "patterns": [
+      {
+        "path": "$.$defs.SourceRecord.properties.source_checksum.pattern",
+        "value": "^[0-9a-f]{64}$"
+      }
+    ],
+    "numeric_constraints": [
+      {
+        "path": "$.$defs.SourceRecord.properties.page_number.exclusiveMinimum",
+        "value": 0
+      }
+    ],
+    "array_constraints": [
+      {
+        "path": "$.$defs.ComputedValue.properties.operands.minItems",
+        "value": 2
+      },
+      {
+        "path": "$.$defs.ComputedValue.properties.input_source_record_ids.minItems",
+        "value": 1
+      },
+      {
+        "path": "$.properties.rows.maxItems",
+        "value": 10000
+      },
+      {
+        "path": "$.properties.rows.minItems",
+        "value": 1
+      },
+      {
+        "path": "$.properties.columns.minItems",
+        "value": 1
+      },
+      {
+        "path": "$.properties.source_records.minItems",
+        "value": 1
+      }
+    ],
+    "enums": [
+      {
+        "path": "$.$defs.ComputedValue.properties.operation.enum",
+        "value": [
+          "sum",
+          "difference",
+          "percentage_difference"
+        ]
+      },
+      {
+        "path": "$.properties.task_type.enum",
+        "value": [
+          "artifact_chart",
+          "artifact_table"
+        ]
+      }
+    ],
+    "description_count": 0,
+    "longest_description_characters": 0
+  },
+  "replacement_llm_facing_schema": {
+    "model": "ArtifactDatasetProposal",
+    "serialized_characters": 1386,
+    "definition_count": 1,
+    "definitions": [
+      "ArtifactRowProposal"
+    ],
+    "maximum_nesting_depth": 8,
+    "formats": [],
+    "patterns": [],
+    "numeric_constraints": [],
+    "array_constraints": [],
+    "enums": [],
+    "description_count": 2,
+    "longest_description_characters": 76
+  },
+  "regression_guard_note": "These conservative local checks reduce schema complexity but do not guarantee acceptance by a model provider."
+}

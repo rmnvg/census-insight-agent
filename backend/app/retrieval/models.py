@@ -22,7 +22,7 @@ class RetrievedEvidence(BaseModel):
     section_path: list[str]
     extraction_method: IndexedExtractionMethod
     coverage_status: PageCoverageStatus
-    source_checksum: str = ""
+    source_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     retrieval_score: float
 
 

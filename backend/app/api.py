@@ -1,7 +1,8 @@
+import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
 
@@ -14,6 +15,7 @@ from backend.app.agent.models import (
 )
 from backend.app.agent.service import AgentChatError, UnknownSessionError, get_agent_service
 from backend.app.config import get_settings
+from backend.app.execution.contracts import ArtifactDescriptor, ArtifactListing, ExecutorHealth
 from backend.app.ingestion.models import IngestionReport
 from backend.app.ingestion.service import IngestionService
 from backend.app.providers.embeddings import VertexEmbeddingProvider
@@ -61,10 +63,70 @@ async def get_session_context(session_id: str) -> SessionContextStatus:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+@router.get("/sessions/{session_id}/artifacts", response_model=ArtifactListing, tags=["artifacts"])
+async def list_artifacts(session_id: str) -> ArtifactListing:
+    service = get_agent_service()
+    try:
+        if await service.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        return service.artifacts.list(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Not found") from error
+
+
+@router.get(
+    "/sessions/{session_id}/artifacts/{artifact_id}",
+    response_model=ArtifactDescriptor,
+    tags=["artifacts"],
+)
+async def get_artifact(session_id: str, artifact_id: str) -> ArtifactDescriptor:
+    service = get_agent_service()
+    try:
+        if await service.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        artifact = service.artifacts.get(session_id, artifact_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Not found") from error
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return artifact
+
+
+@router.get("/sessions/{session_id}/artifacts/{artifact_id}/files/{filename}", tags=["artifacts"])
+async def download_artifact_file(session_id: str, artifact_id: str, filename: str) -> FileResponse:
+    service = get_agent_service()
+    try:
+        if await service.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        path = service.artifacts.public_file(session_id, artifact_id, filename)
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Not found") from error
+    if path is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@router.get("/health/executor", response_model=ExecutorHealth, tags=["health"])
+def executor_health() -> ExecutorHealth:
+    age = get_agent_service().execution_queue.heartbeat_age_seconds()
+    healthy = age is not None and age < 15
+    return ExecutorHealth(
+        status="ok" if healthy else "error",
+        detail="Executor heartbeat is current" if healthy else "Executor heartbeat is unavailable",
+        heartbeat_age_seconds=round(age, 3) if age is not None else None,
+    )
+
+
 @router.post(
     "/chat",
     response_model=AgentResponse,
-    responses={504: {"model": AgentErrorResponse}},
+    responses={
+        500: {"model": AgentErrorResponse},
+        502: {"model": AgentErrorResponse},
+        503: {"model": AgentErrorResponse},
+        504: {"model": AgentErrorResponse},
+    },
     tags=["agent"],
 )
 async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
@@ -82,7 +144,17 @@ async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
             trace_id=error.run_id,
             retryable=error.error.retryable,
         )
-        return JSONResponse(status_code=504, content=payload.model_dump())
+        status_code = (
+            500
+            if error.error.code == "INTERNAL_PROVENANCE_INVALID"
+            else 504
+            if error.error.code
+            in {"MODEL_TIMEOUT", "EVIDENCE_ASSESSMENT_TIMEOUT", "AGENT_REQUEST_TIMEOUT"}
+            else 503
+            if error.error.code in {"MODEL_RATE_LIMITED", "MODEL_UNAVAILABLE"}
+            else 502
+        )
+        return JSONResponse(status_code=status_code, content=payload.model_dump())
 
 
 @router.get("/runs/{run_id}/trace", response_model=RunTrace, tags=["agent"])

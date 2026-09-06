@@ -8,6 +8,7 @@ from backend.app.agent.models import (
     DraftAnswer,
     DraftClaim,
 )
+from backend.app.agent.scopes import canonical_scopes
 from backend.app.retrieval.models import RetrievedEvidence
 
 _NUMBER = re.compile(r"(?<![\d,])\d[\d,]*(?:\.\d+)?(?!\d)")
@@ -96,19 +97,20 @@ def enrich_source_claims(
         ]
         section = " ".join(part for item in selected for part in item.section_path).casefold()
         text = claim.text.casefold()
+        population_scope, residence_scope = canonical_scopes(
+            f"{query} {claim.text}",
+            claim.population_scope
+            or ("persons" if "persons" in text or "persons" in section else None),
+            claim.residence_scope,
+        )
         enriched.append(
             claim.model_copy(
                 update={
                     "metric": claim.metric or ("literacy_rate" if "literacy" in text else None),
                     "region": claim.region or (next(iter(regions)) if len(regions) == 1 else None),
                     "year": claim.year or (query_years[0] if len(set(query_years)) == 1 else None),
-                    "population_scope": claim.population_scope
-                    or ("persons" if "persons" in text or "persons" in section else None),
-                    "residence_scope": claim.residence_scope
-                    or next(
-                        (scope for scope in ("total", "rural", "urban") if scope in text),
-                        None,
-                    ),
+                    "population_scope": population_scope,
+                    "residence_scope": residence_scope,
                     "value": (
                         claim.value if claim.value is not None else values[0] if values else None
                     ),

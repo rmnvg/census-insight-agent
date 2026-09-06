@@ -131,8 +131,8 @@ to ten results because real-corpus Recall@10 reached 1.00 while relevant evidenc
 below five. `list_documents`, `get_document_coverage`, `list_skills`, and `read_skill` expose only
 typed metadata. Summary requests enumerate page-distributed section representatives instead of
 summarizing the first top-k hits. Comparisons retrieve every requested side independently. The
-internal arithmetic helper permits only sum, difference, and percentage difference; general code
-execution remains pending Prompt 5.
+internal arithmetic helper permits only sum, difference, and percentage difference. Artifact
+requests use the separately isolated executor described below.
 
 Skills are non-executable Markdown with validated front matter. Only safe names within the
 configured directory are readable, and only the skill matching the classified task is loaded.
@@ -149,8 +149,8 @@ returns no unsupported factual answer.
 
 Insufficient evidence produces a citation-safe refusal, while excluded visual coverage is disclosed
 without claiming that the fact is absent from the authoritative PDF. Out-of-scope requests explain
-the supplied-Census-document boundary. Artifact intents return a typed `capability_pending` result
-until Prompt 5 adds the isolated executor and rendering pipeline.
+the supplied-Census-document boundary. Artifact intents proceed only after source evidence and a
+typed dataset pass deterministic validation.
 
 ### Structured comparison and checkpoint contracts
 
@@ -167,8 +167,70 @@ explicitly asks for a percent-higher/lower or relative comparison. Derived claim
 validated calculation results, reference both input claim IDs, and inherit both sources. They are
 validated mathematically rather than requiring the derived result to occur in either document.
 
-New checkpoints use schema version 3. Application Pydantic models are converted to JSON-safe
+New checkpoints use schema version 4. Application Pydantic models are converted to JSON-safe
 primitives at every graph-node boundary and reconstructed with validated model constructors on node
 entry. LangGraph's registered message values remain under its message reducer. Development
-checkpoints created before schema version 3 are retained. Successful pre-v3 traces can seed a
+checkpoints created before schema version 4 are retained. Successful pre-v3 traces can seed a
 bounded claim-history migration, while current Qdrant payloads remain the only source evidence.
+
+## Artifact execution trust boundary
+
+Artifact requests follow classify → resolve → skill discovery/read → evidence retrieval and
+assessment → typed dataset construction → lineage validation → Python generation → AST policy →
+isolated execution → output/lineage validation → persistence. A correctable runtime or output error
+may receive one model-authored code repair; policy violations, timeouts, missing evidence, and
+protocol errors never do. A second execution failure stops with no artifact claim.
+
+The backend and executor share only `workspace/execution-queue`. Requests, claims, and results use
+temporary-file-plus-rename publication. The worker claims a request by an atomic rename and creates
+a unique job directory. After validation, the backend atomically moves that directory to the owning
+session's artifact directory. The Docker socket is never mounted: giving generated code indirect
+control of Docker would collapse the isolation boundary. The executor also has no network,
+credentials, Qdrant access, or session-workspace mount, preventing generated code from contacting
+providers or reading another session's files.
+
+`ArtifactDataset` is the sole factual input to generated code. Every numeric source cell maps to an
+exact quote and document/checksum/page/chunk provenance. Derived cells retain operation, operands,
+result, and source-record IDs. The companion CSV must equal the approved rows, while the manifest
+must equal approved lineage; an image alone can never pass. Public endpoints serve only files listed
+in a validated execution result and explicitly exclude `generated.py` and `input.json`.
+
+The full `ArtifactDataset` is deliberately not a model constrained-output schema. Gemini proposes a
+small, flat `ArtifactDatasetProposal` containing presentation labels, an optional non-authoritative
+chart kind, values, semantic scope references, and current-run evidence IDs. Artifact identity is
+owned by the validated `ArtifactDataRequirement`; it is absent from the proposal schema. Application
+code then binds each proposal row to the exact trusted table
+row and metric/year/residence/population column, accepts equivalent decimal formatting, and rejects
+unknown, duplicated, ambiguous, or unsupported values. Only application code copies the document,
+physical page, chunk, checksum, raw value, and exact quote into `SourceRecord`. The resulting strict
+dataset still passes the original dataset and lineage validators before code generation or executor
+submission. The schema-size check is a conservative regression guard, not proof of provider
+acceptance.
+
+`source_checksum` is mandatory lowercase SHA-256 provenance on every `RetrievedEvidence` object.
+Hybrid-search deserialization validates it at the Qdrant boundary, and JSON-safe LangGraph
+checkpoint round trips reconstruct the same typed object. Artifact retrieval validates all selected
+evidence again before requesting a model proposal. A missing or malformed checksum therefore stops
+before paid proposal generation and executor submission with sanitized
+`INTERNAL_PROVENANCE_INVALID` HTTP 500 semantics; FastAPI HTTP 422 remains reserved for malformed
+incoming request bodies. The model-facing proposal contains no checksum field and cannot override
+application-owned provenance.
+
+Population/sex category and residence are independent canonical dimensions shared by artifact and
+ordinary claim processing. “Total persons” means Persons with Total residence; Rural and Urban
+phrasing overrides that residence default, while Female and Male remain population categories.
+Unspecified dimensions are not silently supplied from a model proposal.
+
+Artifact presentation intent is separate from its `ArtifactDataRequirement`. A chart request names
+the required metric, year, regions, population scope, and residence scope; retrieval seeks those
+numeric inputs, not pre-existing charts. Multi-target artifacts reuse the comparison strategy: one
+filtered search per target, followed by deterministic target-aware assessment packing. The packer
+reserves a complete value-bearing candidate for each target before filling remaining space and
+returns `EVIDENCE_BUDGET_INSUFFICIENT` if those reservations cannot fit. It never silently removes
+one side of a comparison. Dataset source records repeat the typed scopes, units, document title,
+physical page, chunk, exact quote, and checksum so compatible, complete coverage is validated before
+the executor is called.
+
+The executor uses Docker isolation as its primary boundary and AST filtering as defense in depth.
+This design reduces risk but is not equivalent to a hardened hostile multi-tenant sandbox: kernel,
+container-runtime, resource-accounting, and static-analysis limitations remain.

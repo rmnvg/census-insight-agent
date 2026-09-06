@@ -180,7 +180,9 @@ class TraceStore:
                         citation_ids=[value["citation_id"] for value in matched],
                         document_ids=[value["document_id"] for value in matched],
                         page_numbers=[value["page_number"] for value in matched],
-                        source_checksums=["" for _ in matched],
+                        # Pre-v3 traces did not retain checksums. Mark the expected
+                        # value unknown; current Qdrant payload validation remains strict.
+                        source_checksums=[None for _ in matched],
                     )
                 )
             if claims:

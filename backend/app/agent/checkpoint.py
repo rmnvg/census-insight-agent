@@ -8,6 +8,7 @@ from backend.app.agent.models import (
     AgentResponse,
     AgentState,
     AnswerClaim,
+    ArtifactDataRequirement,
     ArtifactResult,
     CalculationResult,
     Citation,
@@ -20,9 +21,15 @@ from backend.app.agent.models import (
     ValidatedClaimRecord,
     ValidatedClaimTurn,
 )
+from backend.app.execution.contracts import (
+    ArtifactDataset,
+    ArtifactDescriptor,
+    ExecutionRequest,
+    ExecutionResult,
+)
 from backend.app.retrieval.models import RetrievedEvidence
 
-CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_SCHEMA_VERSION = 4
 
 
 def checkpoint_safe(value: Any) -> Any:
@@ -51,21 +58,25 @@ def hydrate_agent_state(raw: AgentState | dict[str, Any]) -> AgentState:
     state = dict(raw)
     scalar_models: dict[str, type[BaseModel]] = {
         "classification": TaskClassification,
+        "artifact_requirement": ArtifactDataRequirement,
         "plan": AgentPlan,
         "evidence_assessment": EvidenceAssessment,
         "support_assessment": SupportAssessment,
         "draft_answer": DraftAnswer,
         "final_response": AgentResponse,
+        "artifact_dataset": ArtifactDataset,
+        "execution_request": ExecutionRequest,
+        "execution_result": ExecutionResult,
     }
     list_models: dict[str, type[BaseModel]] = {
         "retrieved_evidence": RetrievedEvidence,
         "selected_evidence": RetrievedEvidence,
         "answer_claims": AnswerClaim,
         "citations": Citation,
-        "artifacts": ArtifactResult,
         "tool_calls": ToolCallRecord,
         "trace_events": TraceEvent,
         "calculations": CalculationResult,
+        "artifact_descriptors": ArtifactDescriptor,
         "validated_claim_history": ValidatedClaimTurn,
         "source_support_claims": ValidatedClaimRecord,
     }
@@ -76,6 +87,16 @@ def hydrate_agent_state(raw: AgentState | dict[str, Any]) -> AgentState:
     for key, model in list_models.items():
         if key in state:
             state[key] = _models(state[key], model)
+    if "artifacts" in state:
+        state["artifacts"] = [
+            _model(
+                item,
+                ArtifactDescriptor
+                if isinstance(item, dict) and "artifact_id" in item
+                else ArtifactResult,
+            )
+            for item in state["artifacts"]
+        ]
     return cast(AgentState, state)
 
 

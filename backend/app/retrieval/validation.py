@@ -1,4 +1,6 @@
 import argparse
+import re
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -20,6 +22,7 @@ class CollectionValidationReport(BaseModel):
     non_empty_sparse_vectors: int
     excluded_pages_indexed: int
     unverified_ocr_points: int
+    invalid_by_field: dict[str, int] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
 
 
@@ -80,11 +83,13 @@ def validate_collection(
         for point in points:
             report.scanned_points += 1
             errors: list[str] = []
+            invalid_fields: set[str] = set()
             point_id = str(point.id)
             payload = point.payload or {}
             missing = REQUIRED_PAYLOAD_FIELDS - payload.keys()
             if missing:
                 errors.append(f"missing payload fields {sorted(missing)}")
+                invalid_fields.update(missing)
             chunk_id = payload.get("chunk_id")
             text = payload.get("text")
             snippet = payload.get("citation_snippet")
@@ -97,12 +102,29 @@ def validate_collection(
             if not isinstance(chunk_id, str) or chunk_id in chunk_ids:
                 report.duplicate_chunk_ids += 1
                 errors.append("missing or duplicate chunk id")
+                invalid_fields.add("chunk_id")
             else:
                 chunk_ids.add(chunk_id)
             if not isinstance(page, int) or page < 1:
                 errors.append("invalid one-based page number")
+                invalid_fields.add("page_number")
+            if not isinstance(document_id, str) or not document_id.strip():
+                errors.append("missing document id")
+                invalid_fields.add("document_id")
+            checksum = payload.get("source_checksum")
+            if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+                errors.append("missing or invalid source checksum")
+                invalid_fields.add("source_checksum")
+            if payload.get("coverage_status") not in {
+                "indexed_provided_markdown",
+                "indexed_pymupdf4llm_fallback",
+                "approved_manual_transcription",
+            }:
+                errors.append("unsafe coverage status")
+                invalid_fields.add("coverage_status")
             if not isinstance(text, str) or not isinstance(snippet, str) or snippet not in text:
                 errors.append("citation snippet is not verbatim chunk text")
+                invalid_fields.add("citation_snippet")
             if payload.get("extraction_method") == "unverified_ocr":
                 report.unverified_ocr_points += 1
                 errors.append("unverified OCR is indexed")
@@ -126,6 +148,8 @@ def validate_collection(
                 errors.append("missing or empty sparse vector")
             if errors:
                 report.invalid_points += 1
+                for field in invalid_fields:
+                    report.invalid_by_field[field] = report.invalid_by_field.get(field, 0) + 1
                 if len(report.errors) < 25:
                     report.errors.append(f"point {point_id}: {'; '.join(errors)}")
             else:
@@ -142,6 +166,7 @@ def validate_collection(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only Qdrant payload/vector audit")
     parser.add_argument("--expected-points", type=int, required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     settings = get_settings()
     excluded = {
@@ -158,7 +183,11 @@ def main() -> int:
         dense_dimensions=settings.gemini_embedding_dimension,
         excluded_pages=excluded,
     )
-    print(report.model_dump_json(indent=2))
+    rendered = report.model_dump_json(indent=2) + "\n"
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+    print(rendered, end="")
     return int(bool(report.errors or report.invalid_points))
 
 

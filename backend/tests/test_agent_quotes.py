@@ -22,6 +22,7 @@ def evidence(text: str, *, page_number: int = 10) -> RetrievedEvidence:
         section_path=["Literacy"],
         extraction_method="provided_markdown",
         coverage_status="indexed_provided_markdown",
+        source_checksum="a" * 64,
         retrieval_score=1.0,
     )
 

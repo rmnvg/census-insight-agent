@@ -21,6 +21,13 @@ dependencies = [
 ocr = [
     "pillow==12.3.0",
 ]
+executor = [
+    "matplotlib==3.10.6",
+    "numpy==2.3.3",
+    "pandas==2.3.2",
+    "pillow==12.3.0",
+    "seaborn==0.13.2",
+]
 
 [dependency-groups]
 dev = [
@@ -44,6 +51,7 @@ testpaths = ["backend/tests"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+extend-exclude = ["data", "workspace"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

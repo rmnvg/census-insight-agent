@@ -102,6 +102,17 @@ def evidence_references(claims: list[ValidatedClaimRecord]) -> dict[str, Evidenc
     references: dict[str, EvidenceReference] = {}
     for claim in claims:
         for index, evidence_id in enumerate(claim.evidence_ids):
+            if not all(
+                index < len(values)
+                for values in (
+                    claim.document_ids,
+                    claim.page_numbers,
+                    claim.source_checksums,
+                )
+            ):
+                # Legacy claims without complete checksum-bound provenance may
+                # remain descriptive memory, but cannot rehydrate evidence.
+                continue
             references.setdefault(
                 evidence_id,
                 EvidenceReference(

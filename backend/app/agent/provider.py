@@ -1,11 +1,12 @@
 import asyncio
+import json
 import time
 from contextvars import ContextVar, Token
-from typing import Protocol, TypeVar, cast
+from typing import Literal, Protocol, TypeVar, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from backend.app.agent.models import (
     CalculationPlan,
@@ -16,6 +17,12 @@ from backend.app.agent.models import (
     ResolvedQuery,
     SupportAssessment,
     TaskClassification,
+)
+from backend.app.execution.contracts import (
+    ArtifactDataset,
+    ArtifactDatasetProposal,
+    GeneratedProgram,
+    SourceManifest,
 )
 from backend.app.retrieval.models import RetrievedEvidence
 
@@ -29,6 +36,69 @@ class ProviderCallTimeout(TimeoutError):
         self.elapsed_seconds = elapsed_seconds
         self.timeout_seconds = timeout_seconds
         self.retry_count = retry_count
+
+
+ProviderErrorCode = Literal[
+    "MODEL_SCHEMA_REJECTED",
+    "MODEL_RATE_LIMITED",
+    "MODEL_AUTHENTICATION_FAILED",
+    "MODEL_OUTPUT_INVALID",
+    "MODEL_UNAVAILABLE",
+]
+
+
+class ProviderOperationalError(RuntimeError):
+    def __init__(
+        self,
+        code: ProviderErrorCode,
+        *,
+        retryable: bool,
+        provider_exception: str,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+        self.provider_exception = provider_exception
+        self.status_code = status_code
+
+
+def map_provider_error(error: Exception) -> ProviderOperationalError:
+    """Map provider/structured-output failures without exposing provider text publicly."""
+    name = type(error).__name__
+    folded = f"{name} {error}".casefold()
+    raw_status = getattr(error, "status_code", None) or getattr(error, "code", None)
+    status = raw_status if isinstance(raw_status, int) else None
+    if isinstance(error, ValidationError):
+        return ProviderOperationalError(
+            "MODEL_OUTPUT_INVALID", retryable=False, provider_exception=name, status_code=status
+        )
+    if "schema" in folded and (
+        "invalid_argument" in folded
+        or "invalid argument" in folded
+        or "too many states" in folded
+        or "invalidrequest" in folded
+    ):
+        return ProviderOperationalError(
+            "MODEL_SCHEMA_REJECTED", retryable=False, provider_exception=name, status_code=status
+        )
+    if status == 429 or any(value in folded for value in ("resourceexhausted", "rate limit")):
+        return ProviderOperationalError(
+            "MODEL_RATE_LIMITED", retryable=True, provider_exception=name, status_code=status
+        )
+    if status in {401, 403} or any(
+        value in folded
+        for value in ("unauthenticated", "authentication", "permissiondenied", "permission denied")
+    ):
+        return ProviderOperationalError(
+            "MODEL_AUTHENTICATION_FAILED",
+            retryable=False,
+            provider_exception=name,
+            status_code=status,
+        )
+    return ProviderOperationalError(
+        "MODEL_UNAVAILABLE", retryable=True, provider_exception=name, status_code=status
+    )
 
 
 def set_request_deadline(deadline: float) -> Token[float | None]:
@@ -79,6 +149,23 @@ class AgentModel(Protocol):
 
     async def summarize_memory(self, context: list[BaseMessage]) -> str: ...
 
+    async def propose_artifact_dataset(
+        self, query: str, task_type: str, evidence: list[RetrievedEvidence]
+    ) -> ArtifactDatasetProposal: ...
+
+    async def generate_artifact_code(
+        self, dataset: ArtifactDataset, skill: str
+    ) -> GeneratedProgram: ...
+
+    async def repair_artifact_code(
+        self,
+        dataset: ArtifactDataset,
+        code: str,
+        skill: str,
+        error_code: str,
+        stderr: str,
+    ) -> GeneratedProgram: ...
+
 
 class GeminiAgentModel:
     def __init__(
@@ -101,8 +188,8 @@ class GeminiAgentModel:
                 break
             attempts_left = self.max_retries + 1 - attempt
             attempt_timeout = remaining / attempts_left
-            runnable = self.model.with_structured_output(schema)
             try:
+                runnable = self.model.with_structured_output(schema)
                 result = await asyncio.wait_for(
                     runnable.ainvoke([SystemMessage(content=system), HumanMessage(content=human)]),
                     timeout=attempt_timeout,
@@ -111,6 +198,8 @@ class GeminiAgentModel:
             except TimeoutError:
                 if attempt == self.max_retries:
                     break
+            except Exception as error:
+                raise map_provider_error(error) from error
         raise ProviderCallTimeout(
             elapsed_seconds=time.monotonic() - started,
             timeout_seconds=max(0.0, call_deadline - started),
@@ -128,6 +217,9 @@ class GeminiAgentModel:
             """Classify a request for an assistant limited to supplied Indian Census reports.
 Use one allowed task_type. Consider conversational context. Extract explicit regions/document IDs.
 Use clarification for unresolved referents, and out_of_scope for unrelated subject matter.
+For artifact tasks, populate artifact_requirement with presentation type and the independent source
+data need: metric, year, regions, population scope, residence scope, and comparison flag. A request
+to create a chart requires numeric source data; it does not require a chart in the source PDF.
 Do not answer the question.""",
             f"Recent conversation:\n{self._context(context)}\n\nCurrent request:\n{query}",
         )
@@ -139,6 +231,7 @@ Do not answer the question.""",
 context. Preserve measure, regions, year, units, and population category. Assistant messages are
 context only, never source evidence. If a referent is genuinely missing, request clarification.
 Do not invent it. Classify the resolved standalone task and extract all regions/document IDs.
+For artifact tasks, preserve the complete typed artifact data requirement.
 Do not set requires_clarification when the rewritten query contains the metric and every target.""",
             f"Recent conversation:\n{self._context(context)}\n\nCurrent request:\n{query}",
         )
@@ -159,7 +252,9 @@ A definition or table heading is only supporting_definition. Topical overlap wit
 value is related_non_answering. Treat numerically compatible rounding as compatible_rounding, not a
 conflict; contradictory values with the same scope are conflicting. Select only direct evidence,
 compatible rounding evidence, and useful supporting definitions. Evidence is sufficient when at
-least one direct answer exists for each requested comparison target. Excluded-page coverage is
+least one direct answer exists for each requested comparison target. For comparison artifacts,
+verify entity, metric, year, population category, residence scope, explicit value, and compatible
+units for every target. Excluded-page coverage is
 material only when it prevents answering the particular question. Use only supplied evidence
 IDs.""",
             f"Task={task_type}\nQuestion={query}\nCandidates:\n{excerpts}",
@@ -262,3 +357,83 @@ claims.""",
             timeout=self.timeout_seconds,
         )
         return str(response.content)[:2000]
+
+    async def propose_artifact_dataset(
+        self, query: str, task_type: str, evidence: list[RetrievedEvidence]
+    ) -> ArtifactDatasetProposal:
+        excerpts = "\n\n".join(
+            f"EVIDENCE_ID={item.chunk_id}\nREGION={item.region}\nTEXT={item.text}"
+            for item in evidence
+        )
+        return await self._structured(
+            ArtifactDatasetProposal,
+            """Propose only presentation preferences and the minimal rows needed for this artifact.
+Do not choose the authoritative chart/table artifact type. Copy each numeric value from
+the correct trusted evidence table cell. For every row identify its evidence ID, label, optional
+series, unit, year, population scope, and residence scope. Do not provide provenance, checksums,
+paths, citations, manifests, internal row IDs, or computed values. Do not infer or invent
+values.""",
+            f"Task={task_type}\nRequest={query}\nEvidence:\n{excerpts}",
+        )
+
+    async def generate_artifact_code(
+        self, dataset: ArtifactDataset, skill: str
+    ) -> GeneratedProgram:
+        outputs = (
+            "output/chart.png, output/plotted-data.csv, output/source-manifest.json"
+            if dataset.task_type == "artifact_chart"
+            else "output/table.csv, output/table.md, output/source-manifest.json"
+        )
+        input_sample = {
+            "dataset": dataset.model_dump(mode="json"),
+            "source_manifest": SourceManifest(
+                dataset_title=dataset.title,
+                source_records=dataset.source_records,
+                computed_values=dataset.computed_values,
+            ).model_dump(mode="json"),
+        }
+        return await self._structured(
+            GeneratedProgram,
+            """Write task-specific Python that reads only Path('input.json') and writes only the
+declared relative output paths. Use only json, math, statistics, decimal, pathlib, pandas, numpy,
+matplotlib, and seaborn. Do not use open, eval, exec, compile, networking, processes, threads,
+dynamic imports, absolute paths, or parent traversal. The JSON root is an envelope with `dataset`
+and `source_manifest` keys: read rows and display metadata from `payload["dataset"]`, and write
+`payload["source_manifest"]` unchanged to the declared manifest output. The output directory already
+exists; do not create directories. Use literal relative output paths or variables assigned directly
+from those literal Path values. Prefer `Path("input.json").read_text()` and
+`Path("output/...").write_text()` for JSON I/O. Preserve dataset rows exactly in CSV. Charts need
+labeled axes, units, deterministic style,
+tight_layout, at least 120 DPI, and a zero numeric baseline unless explicitly justified. Do not use
+a line chart for unordered categories. Return only the complete program in the code field.""",
+            f"Applicable skill:\n{skill}\n\nDeclared outputs: {outputs}\n"
+            f"Exact input.json envelope and sample:\n{json.dumps(input_sample, indent=2)}",
+        )
+
+    async def repair_artifact_code(
+        self,
+        dataset: ArtifactDataset,
+        code: str,
+        skill: str,
+        error_code: str,
+        stderr: str,
+    ) -> GeneratedProgram:
+        input_sample = {
+            "dataset": dataset.model_dump(mode="json"),
+            "source_manifest": SourceManifest(
+                dataset_title=dataset.title,
+                source_records=dataset.source_records,
+                computed_values=dataset.computed_values,
+            ).model_dump(mode="json"),
+        }
+        return await self._structured(
+            GeneratedProgram,
+            """Repair this artifact program once. Preserve the same restricted Python policy,
+input dataset, declared outputs, exact CSV values, and exact source manifest. The JSON root has
+`dataset` and `source_manifest` keys. Read data from `payload["dataset"]` and write
+`payload["source_manifest"]` unchanged. The output directory already exists; do not create it.
+Address only the reported runtime or artifact-validation failure. Return only the complete repaired
+program.""",
+            f"Skill:\n{skill}\nError={error_code}\nBounded stderr:\n{stderr[:8000]}\n"
+            f"Exact input.json envelope:\n{json.dumps(input_sample, indent=2)}\nProgram:\n{code}",
+        )

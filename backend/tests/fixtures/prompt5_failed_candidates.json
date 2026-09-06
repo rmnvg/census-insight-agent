@@ -1,0 +1,12 @@
+[
+  {"id":"ka-table","region":"Karnataka","page":50,"kind":"direct","score":0.5833334},
+  {"id":"ka-definition","region":"Karnataka","page":10,"kind":"definition","score":0.53571427},
+  {"id":"od-contents","region":"Odisha","page":5,"kind":"contents","score":0.5},
+  {"id":"od-map","region":"Odisha","page":89,"kind":"map","score":0.3678161},
+  {"id":"ka-related","region":"Karnataka","page":16,"kind":"related","score":0.32692307},
+  {"id":"od-graph-one","region":"Odisha","page":88,"kind":"graph","score":0.2},
+  {"id":"ka-table-sibling-one","region":"Karnataka","page":50,"kind":"related","score":0.2},
+  {"id":"ka-table-sibling-two","region":"Karnataka","page":50,"kind":"related","score":0.16666667},
+  {"id":"od-graph-two","region":"Odisha","page":88,"kind":"graph","score":0.16666667},
+  {"id":"od-state-table","region":"Odisha","page":82,"kind":"direct","score":0.14285715}
+]

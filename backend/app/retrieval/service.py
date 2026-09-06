@@ -205,6 +205,7 @@ class HybridRetrievalService:
                             "section_path": payload.get("section_path", []),
                             "extraction_method": payload["extraction_method"],
                             "coverage_status": payload["coverage_status"],
+                            "source_checksum": payload["source_checksum"],
                             "retrieval_score": point.score,
                         }
                     )

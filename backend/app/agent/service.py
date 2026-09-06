@@ -28,6 +28,7 @@ from backend.app.agent.provider import (
 from backend.app.agent.skills import SkillRegistry
 from backend.app.agent.tools import AgentTools
 from backend.app.config import Settings, get_settings
+from backend.app.execution.client import ArtifactStore, ExecutionQueueClient
 from backend.app.providers.chat import get_chat_model
 from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.qdrant_store import QdrantStore
@@ -57,6 +58,8 @@ class AgentService:
         self.settings = settings
         self.sessions = SessionStore(settings.workspace_root)
         self.traces = TraceStore(settings.workspace_root)
+        self.execution_queue = ExecutionQueueClient(settings.execution_queue_root)
+        self.artifacts = ArtifactStore(settings.workspace_root, settings.execution_queue_root)
         self.graph_factory = AgentGraph(
             model,
             tools,
@@ -64,6 +67,11 @@ class AgentService:
             memory_turn_threshold=settings.agent_memory_turn_threshold,
             assessment_max_characters=settings.agent_assessment_max_characters,
             assessment_max_chunks=settings.agent_assessment_max_chunks,
+            execution_queue=self.execution_queue,
+            artifact_store=self.artifacts,
+            execution_timeout_seconds=settings.artifact_execution_timeout_seconds,
+            artifact_max_files=settings.artifact_max_files,
+            artifact_max_total_bytes=settings.artifact_max_total_bytes,
         )
 
     @classmethod
@@ -147,6 +155,7 @@ class AgentService:
             "run_id": run_id,
             "user_query": message.strip(),
             "resolved_query": "",
+            "artifact_requirement": None,
             "selected_skill": None,
             "skill_instructions": None,
             "retrieved_evidence": [],
@@ -167,6 +176,13 @@ class AgentService:
             "final_response": None,
             "trace_events": [],
             "calculations": [],
+            "artifact_dataset": None,
+            "generated_code": None,
+            "execution_request": None,
+            "execution_result": None,
+            "artifact_descriptors": [],
+            "artifact_attempt": 0,
+            "artifact_errors": [],
         }
         async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
             graph = self.graph_factory.build(saver)
@@ -226,6 +242,8 @@ class AgentService:
             refusal_reason=(
                 "citation_validation_failed"
                 if response.refusal and state.get("validation_error_codes")
+                else "artifact_generation_failed"
+                if response.refusal and state.get("artifact_errors")
                 else "insufficient_evidence"
                 if response.refusal
                 else None
@@ -273,16 +291,17 @@ class AgentService:
             if values.get("run_id") == run_id:
                 state = values
                 break
-        terminal = self.graph_factory._event(
-            "run_failed",
-            error.node,
-            error_code=error.code,
-            elapsed_seconds=round(error.elapsed_seconds, 3),
-            configured_timeout_seconds=error.configured_timeout_seconds,
-            retry_count=error.retry_count,
-            terminal_status="failed",
+        details: dict[str, object] = {
+            "error_code": error.code,
+            "retry_count": error.retry_count,
+            "terminal_status": "failed",
             **error.diagnostics,
-        )
+        }
+        if error.elapsed_seconds is not None:
+            details["elapsed_seconds"] = round(error.elapsed_seconds, 3)
+        if error.configured_timeout_seconds is not None:
+            details["configured_timeout_seconds"] = error.configured_timeout_seconds
+        terminal = self.graph_factory._event("run_failed", error.node, **details)
         self.traces.write(
             RunTrace(
                 session_id=session_id,
