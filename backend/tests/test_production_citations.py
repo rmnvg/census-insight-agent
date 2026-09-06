@@ -8,6 +8,7 @@ from backend.app.ingestion.coverage import (
     load_manual_transcriptions,
 )
 from backend.app.ingestion.discovery import discover_documents, source_checksum
+from backend.app.ingestion.errors import DocumentPairingError
 from backend.app.ingestion.pages import map_document_pages
 from backend.app.ingestion.safety import validate_chunks_for_indexing
 
@@ -16,7 +17,14 @@ def test_all_production_dry_run_chunks_have_verbatim_citations_without_external_
     data_root = Path("data").resolve()
     source_dir = data_root / "source"
     manifest_dir = data_root / "manifests"
-    pairs = discover_documents(source_dir, manifest_dir)
+    try:
+        pairs = discover_documents(source_dir, manifest_dir)
+    except DocumentPairingError:
+        # The committed override manifest names the production census PDFs, but the PDFs
+        # themselves are gitignored (supplied separately, not checked in). A clean checkout
+        # without them is exactly the "documents are not present" case this test already
+        # skips for below; discovery just raises before reaching that check in that case.
+        pytest.skip("Production census source documents are not present")
     if len(pairs) != 3:
         pytest.skip("Production census source documents are not present")
 
