@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     agent_max_steps: int = 16
     agent_max_tool_calls: int = 12
     agent_memory_turn_threshold: int = 12
-    agent_provider_timeout_seconds: float = 90.0
-    agent_request_timeout_seconds: float = 180.0
+    agent_provider_timeout_seconds: float = 120.0
+    agent_request_timeout_seconds: float = 240.0
     agent_provider_max_retries: int = 2
     agent_assessment_max_characters: int = 12_000
     agent_assessment_max_chunks: int = 12

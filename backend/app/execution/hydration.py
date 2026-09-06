@@ -163,12 +163,15 @@ def _same_scope(expected: str | None, proposed: str | None, name: str) -> str:
         categories = {"persons", "person", "male", "female"}
         expected_category = _words(expected) & categories
         proposed_category = _words(proposed or "") & categories
-        # A proposed value that names no recognized population category (e.g. a model
-        # confusing the residence dimension "Total" with population scope) carries no actual
-        # conflicting assertion and is treated as unspecified, not a mismatch. A proposed value
-        # that does name a category (e.g. "male") is still rejected when it differs from the
-        # expected one.
-        mismatch = bool(proposed_category and expected_category != proposed_category)
+        # Either side may fail to name a recognized population category (e.g. a model writing
+        # "total" or "total population" for `population_scope`, confusing the residence
+        # dimension with population scope). Such a value carries no actual conflicting
+        # assertion and is treated as unspecified, not a mismatch, regardless of which side it
+        # came from. A mismatch is only real when both sides name a recognized category and
+        # those categories differ (e.g. expected "male", proposed "female").
+        mismatch = bool(
+            expected_category and proposed_category and expected_category != proposed_category
+        )
     else:
         mismatch = bool(proposed is not None and proposed_value != expected_value)
     if mismatch:

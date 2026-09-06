@@ -31,6 +31,6 @@ def test_chat_provider_constructs_explicit_vertex_model() -> None:
         vertexai=True,
         api_key=None,
         temperature=0,
-        request_timeout=90.0,
+        request_timeout=120.0,
         max_retries=0,
     )
