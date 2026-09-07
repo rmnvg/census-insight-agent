@@ -1,0 +1,167 @@
+1
+00:00:00,000 --> 00:00:02,020
+Welcome to Census Insight Agent.
+
+2
+00:00:02,020 --> 00:00:08,902
+This project answers questions about the 2011 India Census reports for Karnataka, Odisha, and Madhya Pradesh.
+
+3
+00:00:08,902 --> 00:00:15,090
+Its goal is to make census analysis useful and auditable: factual claims must connect to evidence.
+
+4
+00:00:15,090 --> 00:00:20,330
+This video shows the real running application, with waiting time edited for length.
+
+5
+00:00:20,930 --> 00:00:25,165
+The interface is built with Streamlit and calls a Fast API backend.
+
+6
+00:00:25,165 --> 00:00:31,297
+LangGraph coordinates task classification, retrieval, evidence assessment, and answer validation.
+
+7
+00:00:31,297 --> 00:00:35,533
+Gemini runs through Vertex AI with Application Default Credentials.
+
+8
+00:00:35,533 --> 00:00:39,578
+Qdrant combines dense retrieval with local B M 25 sparse search.
+
+9
+00:00:39,578 --> 00:00:47,670
+For charts, an isolated executor receives verified data through a filesystem queue, without network access or cloud credentials.
+
+10
+00:00:48,270 --> 00:00:50,925
+I started the project with Docker Compose.
+
+11
+00:00:50,925 --> 00:00:59,460
+All four application services became healthy, and the existing Qdrant collection contained two thousand and fifty eight indexed points.
+
+12
+00:00:59,460 --> 00:01:10,270
+The project quality gate also passed: three hundred and five tests, formatting, linting, type checks, an offline interface smoke test, a security audit, and a secret scan.
+
+13
+00:01:10,870 --> 00:01:15,060
+Here is the running application at localhost, port eighty five oh one.
+
+14
+00:01:15,060 --> 00:01:18,831
+The sidebar displays service health and source report coverage.
+
+15
+00:01:18,831 --> 00:01:21,704
+A conversation keeps related questions together.
+
+16
+00:01:21,704 --> 00:01:27,750
+I will demonstrate a lookup, a follow up comparison, a generated chart, and an out of scope question.
+
+17
+00:01:28,350 --> 00:01:31,849
+First, I ask: What was Karnataka's literacy rate in 2011?
+
+18
+00:01:31,849 --> 00:01:35,594
+The live answer reports seventy five point three six percent.
+
+19
+00:01:35,594 --> 00:01:40,136
+It includes verified claims and source references to the Karnataka report.
+
+20
+00:01:40,136 --> 00:01:44,740
+The answer is useful because we can inspect the evidence behind the number.
+
+21
+00:01:45,340 --> 00:01:50,699
+Expanding a source citation reveals the original excerpt and the physical PDF page.
+
+22
+00:01:50,699 --> 00:01:56,058
+Citation validation uses document identity, page provenance, and exact source text.
+
+23
+00:01:56,058 --> 00:02:01,740
+Retrieval only finds candidate evidence; application code must still validate the claim.
+
+24
+00:02:01,740 --> 00:02:06,130
+If that validation fails, the system can refuse instead of guessing.
+
+25
+00:02:06,730 --> 00:02:09,604
+Next, I ask: How does that compare with Odisha?
+
+26
+00:02:09,604 --> 00:02:17,125
+In this live run, the application found relevant evidence but could not produce a response that passed citation validation.
+
+27
+00:02:17,125 --> 00:02:18,409
+It therefore refused.
+
+28
+00:02:18,409 --> 00:02:27,520
+This demonstrates the validation boundary, but also a current reliability limitation: a supported question does not always result in a usable answer.
+
+29
+00:02:27,520 --> 00:02:30,210
+This recording preserves the actual outcome.
+
+30
+00:02:30,810 --> 00:02:36,903
+Now I request a bar chart comparing total persons literacy rates for Karnataka and Odisha in 2011.
+
+31
+00:02:36,903 --> 00:02:43,555
+The model proposes data, and application code verifies the cells against trusted evidence before execution.
+
+32
+00:02:43,555 --> 00:02:47,223
+The isolated worker produces the chart and companion files.
+
+33
+00:02:47,223 --> 00:02:52,880
+The interface exposes the chart, plotted data, and source manifest for review and download.
+
+34
+00:02:53,480 --> 00:02:57,011
+Finally, I ask about France's unemployment rate in 2011.
+
+35
+00:02:57,011 --> 00:03:00,730
+This question is outside the supplied Indian census corpus.
+
+36
+00:03:00,730 --> 00:03:03,505
+The application refuses to invent an answer.
+
+37
+00:03:03,505 --> 00:03:08,170
+That boundary matters: missing evidence should remain visible to the user.
+
+38
+00:03:08,770 --> 00:03:14,888
+The original PDFs remain the authoritative sources, with supplied Markdown preferred for extraction.
+
+39
+00:03:14,888 --> 00:03:24,065
+Twelve unverified Karnataka visual pages are excluded from indexing; that is a coverage limitation, not proof that information is absent from the PDF.
+
+40
+00:03:24,065 --> 00:03:29,388
+Docker isolation is designed for development, and production needs stronger sandboxing.
+
+41
+00:03:29,388 --> 00:03:33,854
+The README explains local setup, source files, and Vertex authentication.
+
+42
+00:03:33,854 --> 00:03:36,240
+This completes the project walkthrough.

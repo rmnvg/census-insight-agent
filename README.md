@@ -14,10 +14,27 @@ Ask it about literacy rates, population, sex ratios, and district rankings acros
 and Madhya Pradesh. It looks things up, summarizes, compares, ranks, checks internal consistency,
 and builds charts/tables — and it says "I don't know" instead of making something up.
 
+## Demo video
+
+[![Watch the narrated project demo](docs/demo/poster.jpg)](docs/demo/census-insight-demo.mp4)
+
+**[Watch or download the demo (MP4, about 3½ minutes)](docs/demo/census-insight-demo.mp4)** ·
+[Transcript](docs/demo/TRANSCRIPT.md) · [Captions](docs/demo/census-insight-demo.srt)
+
+Recorded from the running application on September 7, 2026, with synthetic English narration.
+Covers architecture, healthy services, a cited lookup, a follow-up, chart generation, and an
+out-of-scope refusal. Model waiting time is edited out and selected frames are held for explanation.
+The follow-up comparison failed citation validation in this run; the video preserves and explains
+that result. The lookup and chart succeeded. `make check` passed all 305 tests.
+
+The video is included in the repository. If GitHub shows a file page instead of a player, use
+**View raw** or **Download raw file** to watch it.
+
 ---
 
 ## Table of contents
 
+- [Demo video](#demo-video)
 - [What makes this different](#what-makes-this-different)
 - [Architecture](#architecture)
 - [How a request actually flows](#how-a-request-actually-flows)
