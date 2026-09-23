@@ -11,7 +11,11 @@ from qdrant_client import models
 from backend.app.agent.calculations import rounded_subtraction
 from backend.app.agent.models import EvidenceReference
 from backend.app.agent.skills import RuntimeSkill, SkillMetadata, SkillRegistry
-from backend.app.ingestion.models import CoverageLimitation, DocumentCoverageReport
+from backend.app.ingestion.models import (
+    CoverageLimitation,
+    DocumentCoverageReport,
+    DocumentManifest,
+)
 from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
@@ -118,23 +122,34 @@ class AgentTools:
         return evidence
 
     async def list_documents(self) -> list[DocumentSummary]:
-        payloads = await asyncio.wait_for(
-            asyncio.to_thread(self.store.list_documents), timeout=self.timeout_seconds
-        )
-        return [
-            DocumentSummary(
-                document_id=str(item["document_id"]),
-                title=str(item["document_title"]),
-                region=str(item["region"]),
-                source_checksum=str(item["source_checksum"]),
-            )
-            for item in payloads
-        ]
+        """Read portable document identity from the generated manifests, not Qdrant.
 
-    async def collect_summary_evidence(
-        self, document_id: str, *, max_sections: int = 24
-    ) -> list[RetrievedEvidence]:
-        """Collect page-distributed section representatives without top-k summary bias."""
+        `search_documents`/`collect_*` already scroll or query Qdrant when they need chunk
+        payloads; this only needs the small, stable per-document identity fields (id, title,
+        region, checksum) that `api.py`'s `_public_documents()` already reads the same way for
+        the same reason — a full collection scroll (all points, with payload) is unnecessary
+        network and deserialization cost just to name the 2-3 documents in this corpus, and it
+        was repeated on every `summary`/`rank_all` request.
+        """
+
+        def _read() -> list[DocumentSummary]:
+            documents: list[DocumentSummary] = []
+            for path in sorted((self.data_root / "manifests" / "generated").glob("*.json")):
+                manifest = DocumentManifest.model_validate_json(path.read_text(encoding="utf-8"))
+                documents.append(
+                    DocumentSummary(
+                        document_id=manifest.document_id,
+                        title=manifest.title,
+                        region=manifest.region,
+                        source_checksum=manifest.source_checksum,
+                    )
+                )
+            return documents
+
+        return await asyncio.to_thread(_read)
+
+    async def _scroll_all(self, scroll_filter: models.Filter, *, limit: int = 256) -> list[Any]:
+        """Page through every matching Qdrant point, deduplicating this loop across callers."""
         records: list[Any] = []
         offset: Any = None
         while True:
@@ -142,14 +157,8 @@ class AgentTools:
                 asyncio.to_thread(
                     self.store.client.scroll,
                     self.store.collection_name,
-                    scroll_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="document_id", match=models.MatchValue(value=document_id)
-                            )
-                        ]
-                    ),
-                    limit=256,
+                    scroll_filter=scroll_filter,
+                    limit=limit,
                     offset=offset,
                     with_payload=True,
                     with_vectors=False,
@@ -159,6 +168,21 @@ class AgentTools:
             records.extend(page)
             if offset is None:
                 break
+        return records
+
+    async def collect_summary_evidence(
+        self, document_id: str, *, max_sections: int = 24
+    ) -> list[RetrievedEvidence]:
+        """Collect page-distributed section representatives without top-k summary bias."""
+        records = await self._scroll_all(
+            models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="document_id", match=models.MatchValue(value=document_id)
+                    )
+                ]
+            )
+        )
         selected: list[RetrievedEvidence] = []
         sections: set[tuple[str, ...]] = set()
         for record in sorted(records, key=lambda item: int((item.payload or {})["page_number"])):
@@ -190,30 +214,15 @@ class AgentTools:
         chunks that best embed near the query text.
         """
         metric_words = _words(metric)
-        records: list[Any] = []
-        offset: Any = None
-        while True:
-            page, offset = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.store.client.scroll,
-                    self.store.collection_name,
-                    scroll_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="document_id", match=models.MatchValue(value=document_id)
-                            )
-                        ]
-                    ),
-                    limit=256,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                ),
-                timeout=self.timeout_seconds,
+        records = await self._scroll_all(
+            models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="document_id", match=models.MatchValue(value=document_id)
+                    )
+                ]
             )
-            records.extend(page)
-            if offset is None:
-                break
+        )
         disqualifying_modifiers = _RANKING_QUALIFIER_WORDS - metric_words
         matched: list[RetrievedEvidence] = []
         for record in records:
@@ -242,57 +251,23 @@ class AgentTools:
                 selected.append(candidate.page_number)
         expanded: list[RetrievedEvidence] = []
         for document_id, page_numbers in pages.items():
-            records, offset = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.store.client.scroll,
-                    self.store.collection_name,
-                    scroll_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="document_id", match=models.MatchValue(value=document_id)
-                            ),
-                            models.FieldCondition(
-                                key="page_number", match=models.MatchAny(any=page_numbers)
-                            ),
-                        ]
-                    ),
-                    limit=128,
-                    with_payload=True,
-                    with_vectors=False,
-                ),
-                timeout=self.timeout_seconds,
-            )
-            while True:
-                expanded.extend(
-                    RetrievedEvidence.model_validate(
-                        {**(record.payload or {}), "retrieval_score": 0.0}
-                    )
-                    for record in records
-                )
-                if offset is None:
-                    break
-                records, offset = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self.store.client.scroll,
-                        self.store.collection_name,
-                        scroll_filter=models.Filter(
-                            must=[
-                                models.FieldCondition(
-                                    key="document_id",
-                                    match=models.MatchValue(value=document_id),
-                                ),
-                                models.FieldCondition(
-                                    key="page_number", match=models.MatchAny(any=page_numbers)
-                                ),
-                            ]
+            records = await self._scroll_all(
+                models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="document_id", match=models.MatchValue(value=document_id)
                         ),
-                        limit=128,
-                        offset=offset,
-                        with_payload=True,
-                        with_vectors=False,
-                    ),
-                    timeout=self.timeout_seconds,
-                )
+                        models.FieldCondition(
+                            key="page_number", match=models.MatchAny(any=page_numbers)
+                        ),
+                    ]
+                ),
+                limit=128,
+            )
+            expanded.extend(
+                RetrievedEvidence.model_validate({**(record.payload or {}), "retrieval_score": 0.0})
+                for record in records
+            )
         return expanded
 
     async def get_document_coverage(

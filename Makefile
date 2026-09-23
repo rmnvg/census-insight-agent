@@ -1,4 +1,4 @@
-.PHONY: sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval
+.PHONY: sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
 
 sync:
 	uv sync --frozen
@@ -67,3 +67,9 @@ ui-smoke:
 
 frontend-security:
 	docker compose exec frontend python -m frontend.security_check
+
+prune-checkpoints-dry-run:
+	uv run --frozen python scripts/prune_checkpoints.py
+
+prune-checkpoints:
+	uv run --frozen python scripts/prune_checkpoints.py --allow-delete

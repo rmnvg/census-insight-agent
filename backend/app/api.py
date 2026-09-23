@@ -1,10 +1,11 @@
 import json
 import mimetypes
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
 from backend.app.agent.models import (
@@ -16,6 +17,7 @@ from backend.app.agent.models import (
 )
 from backend.app.agent.service import AgentChatError, UnknownSessionError, get_agent_service
 from backend.app.config import get_settings
+from backend.app.execution.client import EXECUTOR_HEARTBEAT_HEALTHY_SECONDS
 from backend.app.execution.contracts import ArtifactDescriptor, ArtifactListing, ExecutorHealth
 from backend.app.ingestion.models import (
     CoverageLimitation,
@@ -42,7 +44,13 @@ router = APIRouter()
 
 class ChatRequest(BaseModel):
     session_id: str
-    message: str
+    # No prior upper bound existed at all: a message of any size reached classify/resolve/
+    # synthesize model calls (and could be echoed back into every later turn's context) at full
+    # cost. 4000 characters comfortably covers a detailed question or multi-part comparison
+    # request while bounding the worst case; `AgentService._chat_turn`'s own non-empty check
+    # stays as the guard for direct programmatic callers that bypass this HTTP boundary (e.g.
+    # tests constructing `AgentService` directly).
+    message: str = Field(min_length=1, max_length=4000)
 
 
 SESSION_EXAMPLE = {
@@ -235,12 +243,24 @@ async def download_artifact_file(session_id: str, artifact_id: str, filename: st
 @router.get("/health/executor", response_model=ExecutorHealth, tags=["health"])
 def executor_health() -> ExecutorHealth:
     age = get_agent_service().execution_queue.heartbeat_age_seconds()
-    healthy = age is not None and age < 15
+    healthy = age is not None and age < EXECUTOR_HEARTBEAT_HEALTHY_SECONDS
     return ExecutorHealth(
         status="ok" if healthy else "error",
         detail="Executor heartbeat is current" if healthy else "Executor heartbeat is unavailable",
         heartbeat_age_seconds=round(age, 3) if age is not None else None,
     )
+
+
+_ERROR_CODE_STATUS: dict[str, int] = {
+    "INTERNAL_PROVENANCE_INVALID": 500,
+    "MODEL_TIMEOUT": 504,
+    "EVIDENCE_ASSESSMENT_TIMEOUT": 504,
+    "AGENT_REQUEST_TIMEOUT": 504,
+    "MODEL_RATE_LIMITED": 503,
+    "MODEL_UNAVAILABLE": 503,
+    "EXECUTOR_UNAVAILABLE": 503,
+}
+_DEFAULT_ERROR_STATUS = 502
 
 
 @router.post(
@@ -291,16 +311,7 @@ async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
             trace_id=error.run_id,
             retryable=error.error.retryable,
         )
-        status_code = (
-            500
-            if error.error.code == "INTERNAL_PROVENANCE_INVALID"
-            else 504
-            if error.error.code
-            in {"MODEL_TIMEOUT", "EVIDENCE_ASSESSMENT_TIMEOUT", "AGENT_REQUEST_TIMEOUT"}
-            else 503
-            if error.error.code in {"MODEL_RATE_LIMITED", "MODEL_UNAVAILABLE"}
-            else 502
-        )
+        status_code = _ERROR_CODE_STATUS.get(error.error.code, _DEFAULT_ERROR_STATUS)
         return JSONResponse(status_code=status_code, content=payload.model_dump())
 
 
@@ -534,14 +545,16 @@ def ingest(request: IngestRequest) -> IngestionReport:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
-@router.post(
-    "/retrieval/search",
-    response_model=RetrievalSearchResponse,
-    tags=["retrieval"],
-)
-def retrieval_search(request: RetrievalSearchRequest) -> RetrievalSearchResponse:
+@lru_cache
+def _retrieval_service() -> HybridRetrievalService:
+    """Cached singleton, matching `get_agent_service()`'s pattern below.
+
+    Every prior call built a fresh Qdrant client, Vertex embedder, and — most notably — a fresh
+    `BM25SparseEncoder`, which loads a local FastEmbed ONNX model, on every single request to this
+    endpoint.
+    """
     settings = get_settings()
-    service = HybridRetrievalService(
+    return HybridRetrievalService(
         client=QdrantClient(url=settings.qdrant_url),
         collection_name=settings.qdrant_collection,
         dense_provider=VertexEmbeddingProvider(settings),
@@ -550,6 +563,15 @@ def retrieval_search(request: RetrievalSearchRequest) -> RetrievalSearchResponse
             cache_dir=settings.data_root / "processed" / "fastembed-cache",
         ),
     )
+
+
+@router.post(
+    "/retrieval/search",
+    response_model=RetrievalSearchResponse,
+    tags=["retrieval"],
+)
+def retrieval_search(request: RetrievalSearchRequest) -> RetrievalSearchResponse:
+    service = _retrieval_service()
     try:
         return service.search_response(
             query=request.query,
@@ -558,5 +580,15 @@ def retrieval_search(request: RetrievalSearchRequest) -> RetrievalSearchResponse
             top_k=request.top_k,
             debug=request.debug,
         )
-    except Exception as error:
+    except ValueError as error:
+        # The only ValueError `search_response` raises itself ("Retrieval query must be
+        # non-empty") is a safe, application-level validation message.
         raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        # Anything else (Qdrant connectivity, a malformed stored payload via
+        # RetrievalProvenanceError, ...) is an internal failure; report only its type, the same
+        # sanitization `qdrant_health` already uses, rather than the raw exception text — which
+        # for a connectivity failure could include the internal Qdrant URL/port.
+        raise HTTPException(
+            status_code=502, detail=f"Retrieval unavailable: {type(error).__name__}"
+        ) from error

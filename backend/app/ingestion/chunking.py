@@ -8,6 +8,7 @@ from backend.app.ingestion.safety import UnsafeExtractionError, validate_page_fo
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}")
 CHUNK_NAMESPACE = uuid.UUID("8f125211-267f-47f0-a9dd-751177dcc485")
+_TABLE_CELL_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,39 @@ def _split_blocks(markdown: str) -> list[str]:
     return [block.strip() for block in re.split(r"\n\s*\n", markdown) if block.strip()]
 
 
+def _leading_header_line_count(lines: list[str]) -> int:
+    """Count the leading rows that make up a table's (possibly multi-row) header.
+
+    Line 0 is always the header row and line 1 is always the separator (guaranteed by `_is_table`
+    before this is ever called). Some real corpus tables add one more sub-header row beneath the
+    separator — e.g. a "Total | Rural | Urban" row shared under one year-group header spanning
+    several columns — before data rows begin. Previously only `lines[:2]` was ever treated as
+    header, so that sub-header row was kept on the first split fragment of a long table but
+    silently dropped from every later fragment, leaving residence unrecoverable from a later
+    fragment's own text (see `_residence_by_group_position` in
+    `backend/app/execution/hydration.py`, a runtime fallback added specifically to compensate for
+    this — left in place even after this fix, since this is a heuristic, not an exact parser, and
+    a table shaped differently than every one currently in this corpus could still need it).
+    A row belongs to the header as long as none of its cells is purely numeric; the first row with
+    a standalone numeric cell — a real data value, or a leading code/serial column — marks where
+    data begins.
+    """
+    count = 2
+    for line in lines[2:]:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if any(_TABLE_CELL_NUMBER.fullmatch(cell) for cell in cells if cell):
+            break
+        count += 1
+    return count
+
+
 def _table_parts(table: str, max_characters: int) -> list[str]:
     if len(table) <= max_characters:
         return [table]
     lines = table.splitlines()
-    header = lines[:2]
-    rows = lines[2:]
+    header_count = _leading_header_line_count(lines)
+    header = lines[:header_count]
+    rows = lines[header_count:]
     parts: list[str] = []
     current = header.copy()
     for row in rows:

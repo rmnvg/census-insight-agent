@@ -1,4 +1,6 @@
 import asyncio
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -147,6 +149,15 @@ def base_state(tmp_path: Path) -> dict[str, Any]:
 
 def graph(tmp_path: Path, model: ArtifactModel) -> AgentGraph:
     queue_root = tmp_path / "workspace" / "execution-queue"
+    # ImmediateQueue only writes a heartbeat once its (real ExecutionQueueClient) `submit()` runs
+    # the worker inline — but `prepare_artifact`'s executor pre-flight check runs first, before
+    # any job is submitted. Seed a fresh heartbeat up front so these tests simulate the normal
+    # live-worker condition they otherwise assume, the same as a real `docker compose` deployment
+    # where the worker's heartbeat is already current by the time a chat request arrives.
+    queue_root.mkdir(parents=True, exist_ok=True)
+    (queue_root / "heartbeat.json").write_text(
+        json.dumps({"status": "ok", "updated_at": datetime.now(UTC).isoformat()}), encoding="utf-8"
+    )
     return AgentGraph(
         model,  # type: ignore[arg-type]
         FakeTools(SkillRegistry(tmp_path / "skills")),

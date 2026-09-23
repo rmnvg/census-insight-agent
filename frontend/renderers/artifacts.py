@@ -1,18 +1,13 @@
 import streamlit as st
 
 from frontend.api_client import ApiClientError, CensusApiClient
-from frontend.models import ArtifactSummary, PendingArtifact
+from frontend.models import ArtifactSummary
 from frontend.view_models import parse_csv, validate_png, validate_source_manifest
 
 
-def render_artifacts(
-    artifacts: list[ArtifactSummary | PendingArtifact], api: CensusApiClient
-) -> list[str]:
+def render_artifacts(artifacts: list[ArtifactSummary], api: CensusApiClient) -> list[str]:
     errors: list[str] = []
     for artifact in artifacts:
-        if isinstance(artifact, PendingArtifact):
-            st.info(artifact.message)
-            continue
         try:
             _render_artifact(artifact, api)
         except (ApiClientError, ValueError) as error:

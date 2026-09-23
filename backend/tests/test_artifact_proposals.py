@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -680,6 +681,38 @@ def test_internal_provenance_failure_is_sanitized_http_500_before_provider(
 def test_external_chat_body_validation_remains_http_422() -> None:
     response = TestClient(app).post("/chat", json={"session_id": "missing-message"})
     assert response.status_code == 422
+
+
+def test_prepare_artifact_fails_fast_when_executor_heartbeat_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = CountingArtifactModel()
+    service = AgentService(
+        settings(tmp_path),
+        model,
+        FakeTools(SkillRegistry(tmp_path / "skills")),  # type: ignore[arg-type]
+    )
+    session = run(service.create_session())
+    # `settings()` seeds a fresh heartbeat by default; back-date it here to simulate a down/
+    # unreachable executor, the condition this pre-flight check exists to catch before spending
+    # any artifact-preparation model calls.
+    heartbeat_path = service.execution_queue.root / "heartbeat.json"
+    heartbeat_path.write_text(
+        json.dumps({"status": "ok", "updated_at": "2020-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("backend.app.api.get_agent_service", lambda: service)
+    response = TestClient(app).post(
+        "/chat", json={"session_id": session.session_id, "message": "Create a literacy chart"}
+    )
+    body = response.json()
+    assert response.status_code == 503
+    assert body["error_code"] == "EXECUTOR_UNAVAILABLE"
+    assert body["retryable"] is True
+    assert model.proposal_calls == 0
+    trace = service.get_trace(body["trace_id"])
+    assert trace is not None and trace.run_status == "failed"
+    assert trace.events[-1].node == "prepare_artifact"
+    assert trace.events[-1].details["failure_stage"] == "executor_preflight"
 
 
 class GoogleInvalidRequestError(Exception):

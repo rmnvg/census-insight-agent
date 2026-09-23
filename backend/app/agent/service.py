@@ -23,7 +23,12 @@ from backend.app.agent.models import (
     SessionContextStatus,
     SessionRecord,
 )
-from backend.app.agent.persistence import SessionStore, TraceStore, validate_session_id
+from backend.app.agent.persistence import (
+    SessionStore,
+    TraceStore,
+    safe_trace_details,
+    validate_session_id,
+)
 from backend.app.agent.provider import (
     AgentModel,
     GeminiAgentModel,
@@ -321,16 +326,23 @@ class AgentService:
                     break
         finally:
             await agen.aclose()
-        details: dict[str, object] = {
+        raw_details: dict[str, object] = {
             "error_code": error.code,
             "retry_count": error.retry_count,
             "terminal_status": "failed",
             **error.diagnostics,
         }
         if error.elapsed_seconds is not None:
-            details["elapsed_seconds"] = round(error.elapsed_seconds, 3)
+            raw_details["elapsed_seconds"] = round(error.elapsed_seconds, 3)
         if error.configured_timeout_seconds is not None:
-            details["configured_timeout_seconds"] = error.configured_timeout_seconds
+            raw_details["configured_timeout_seconds"] = error.configured_timeout_seconds
+        # `error.diagnostics` is assembled at each of many different raise sites across the graph
+        # (see graph.py); safe_trace_details' forbidden-substring/size-cap filter was previously
+        # defined but never actually applied to a real trace, only exercised by its own unit test.
+        # Applying it here means a future diagnostics field named/shaped like a secret is dropped
+        # before ever reaching a persisted trace file, not just in cases someone remembered to
+        # filter by hand.
+        details = safe_trace_details(**raw_details)
         terminal = self.graph_factory._event("run_failed", error.node, **details)
         self.traces.write(
             RunTrace(

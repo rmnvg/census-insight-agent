@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -243,6 +244,45 @@ def test_source_checksum_survives_sibling_expansion(tmp_path: Path) -> None:
     expanded = asyncio.run(tools.expand_candidate_pages([candidate]))
     assert len(expanded) == 1
     assert expanded[0].source_checksum == checksum
+
+
+def test_list_documents_reads_generated_manifests_not_qdrant(tmp_path: Path) -> None:
+    # list_documents used to scroll the entire Qdrant collection with full payloads just to name
+    # 2-3 documents; it now reads the small, stable generated manifests instead. A Qdrant client
+    # that fails any call it receives proves this path never touches Qdrant at all.
+    generated = tmp_path / "manifests" / "generated"
+    generated.mkdir(parents=True)
+    (generated / "doc-karnataka.json").write_text(
+        json.dumps(
+            {
+                "document_id": "doc-karnataka",
+                "title": "Karnataka PCA Highlights",
+                "region": "Karnataka",
+                "pdf_path": "data/source/pdf/karnataka.pdf",
+                "source_checksum": "a" * 64,
+                "page_count": 82,
+                "ingestion_version": "1",
+                "extraction_method": ["provided_markdown"],
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class UnreachableClient:
+        def scroll(self, *_: object, **__: object) -> Any:
+            raise AssertionError("list_documents must not query Qdrant")
+
+    store = SimpleNamespace(client=UnreachableClient(), collection_name="collection")
+    tools = AgentTools(
+        cast(Any, None), cast(Any, store), SkillRegistry(tmp_path / "skills"), tmp_path
+    )
+    documents = asyncio.run(tools.list_documents())
+    assert len(documents) == 1
+    assert documents[0].document_id == "doc-karnataka"
+    assert documents[0].title == "Karnataka PCA Highlights"
+    assert documents[0].region == "Karnataka"
+    assert documents[0].source_checksum == "a" * 64
 
 
 def test_unanswerable_signal_does_not_treat_a_score_as_support() -> None:

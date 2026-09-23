@@ -203,6 +203,45 @@ def test_ast_rejects_dunder_traversal_and_absolute_paths(code: str) -> None:
 @pytest.mark.parametrize(
     "code",
     [
+        # Runtime-built path strings dodge the literal-constant check, and pandas/numpy readers
+        # previously had no path scrutiny at all.
+        'pd.read_csv(chr(47) + "etc" + chr(47) + "hosts")',
+        'import numpy as np\nnp.load(chr(47) + "etc" + chr(47) + "hosts")',
+        # Same gap on the write side, for functions that take their destination as an argument
+        # rather than as WRITE_METHODS' method receiver.
+        'frame.to_json(chr(47) + "execution" + chr(47) + "x.json")',
+        'frame.to_html(chr(47) + "execution" + chr(47) + "x.html")',
+        'np.savez(chr(47) + "execution" + chr(47) + "x", a=np.zeros(1))',
+        # An already-imported module's own attribute chain reaches `os`/`sys`/etc. without ever
+        # writing an `import` statement, bypassing ALLOWED_IMPORTS.
+        'pd.io.common.os.execv("output/x", ["x"])',
+        'pd.io.common.os.system("echo hi")',
+        # matplotlib.use() dynamically imports an arbitrary "module://..." backend by string name.
+        'import matplotlib\nmatplotlib.use("module://os")',
+        # str.format() does its own dotted/dunder attribute traversal at runtime, invisible to
+        # this AST visitor (unlike f-strings, whose interpolated expressions are real ast.Attribute
+        # nodes and stay covered).
+        '"{0.__class__}".format(1)',
+    ],
+)
+def test_ast_rejects_obfuscated_path_and_module_escapes(code: str) -> None:
+    assert not validate_code(code).valid
+
+
+def test_ast_still_allows_json_load_on_the_sanctioned_input_file_object() -> None:
+    # `load` is deliberately excluded from the gated read-function names because json.load takes
+    # an open file object, not a path, and collides with numpy's np.load attribute name.
+    code = """
+import json
+with open("input.json", "r") as source:
+    payload = json.load(source)
+"""
+    assert validate_code(code).valid
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
         'Path("input.json").write_text("tamper")',
         'frame.to_csv("outside.csv")',
         'Path("output") / ".." / "other-job"',
@@ -228,6 +267,25 @@ frame.to_csv(csv_path, index=False)
 Path(manifest_path).write_text("{}")
 """
     assert validate_code(code).valid
+
+
+def test_ast_allows_matplotlib_style_use_but_rejects_backend_use() -> None:
+    # Reproduced live 2026-09-23: a real generated chart program was rejected because "use" was
+    # blocked as a plain attribute name, catching `matplotlib.style.use(...)` — a harmless style-
+    # sheet call the codegen prompt's own "deterministic style" instruction makes plausible to
+    # generate — along with the actually-dangerous `matplotlib.use(...)` backend switch. Only the
+    # latter (a call on the bare `matplotlib` module itself) is forbidden.
+    style_code = """
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.style.use("seaborn-v0_8")
+plt.savefig("output/chart.png")
+"""
+    assert validate_code(style_code).valid
+    backend_code = 'import matplotlib\nmatplotlib.use("module://os")'
+    result = validate_code(backend_code)
+    assert not result.valid
+    assert "Forbidden attribute call: use" in result.errors
 
 
 def test_ast_allows_slash_joined_output_paths_when_both_operands_are_static() -> None:

@@ -1,10 +1,25 @@
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 
 from backend.app.retrieval.models import SparseVectorData
 
-BM25_CONFIG: dict[str, str | float | int | bool] = {
+
+class _Bm25Config(TypedDict):
+    k: float
+    b: float
+    avg_len: float
+    language: str
+    token_max_length: int
+    disable_stemmer: bool
+
+
+# Typed (rather than `dict[str, str | float | int | bool]`) so `**BM25_CONFIG` below type-checks
+# against `SparseTextEmbedding`'s individually-typed keyword parameters (PEP 692 `**TypedDict`
+# unpacking) instead of needing every value spelled out twice — once here and once as literal
+# keyword arguments that could silently drift from this dict, which also backs the Qdrant
+# collection-metadata compatibility check in `qdrant_store.py`.
+BM25_CONFIG: _Bm25Config = {
     "k": 1.2,
     "b": 0.75,
     "avg_len": 256.0,
@@ -41,12 +56,7 @@ class BM25SparseEncoder:
             model = SparseTextEmbedding(
                 model_name=model_name,
                 cache_dir=str(cache_dir) if cache_dir else None,
-                k=1.2,
-                b=0.75,
-                avg_len=256.0,
-                language="english",
-                token_max_length=40,
-                disable_stemmer=False,
+                **BM25_CONFIG,
             )
         self._model = model
 

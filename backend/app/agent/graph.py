@@ -5,9 +5,9 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import Any, Literal, cast
+from typing import Any, cast
 
-from langchain_core.messages import AIMessage, BaseMessage, RemoveMessage
+from langchain_core.messages import AIMessage, BaseMessage, RemoveMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
@@ -37,9 +37,9 @@ from backend.app.agent.models import (
     AgentResponse,
     AgentState,
     ArtifactDataRequirement,
-    ArtifactResult,
     CalculationResult,
     DraftAnswer,
+    DraftClaim,
     EvidenceAssessment,
     SupportAssessment,
     TaskClassification,
@@ -50,6 +50,7 @@ from backend.app.agent.provider import AgentModel, ProviderCallTimeout, Provider
 from backend.app.agent.scopes import canonicalize_artifact_requirement
 from backend.app.agent.tools import AgentTools, ArithmeticInput, SearchDocumentsInput
 from backend.app.execution.client import (
+    EXECUTOR_HEARTBEAT_HEALTHY_SECONDS,
     ArtifactStore,
     ExecutionQueueClient,
     ExecutorUnavailableError,
@@ -241,6 +242,45 @@ class AgentGraph:
     def _event(event: str, node: str, **details: object) -> TraceEvent:
         return TraceEvent(event=event, node=node, details=details)
 
+    @staticmethod
+    def _claim_trace_dicts(claims: list[DraftClaim]) -> list[dict[str, object]]:
+        """Bounded, JSON-safe trace representation of draft claims — shared by `synthesize` and
+        `repair`'s otherwise-identical trace events, since a repair produces the same shape of
+        claim the initial synthesis does."""
+        return [
+            {
+                "claim_id": item.claim_id,
+                "text": item.text[:500],
+                "evidence_ids": item.evidence_ids,
+                "document_derived": item.document_derived,
+                "metric": item.metric,
+                "region": item.region,
+                "year": item.year,
+                "population_scope": item.population_scope,
+                "residence_scope": item.residence_scope,
+                "value": item.value,
+                "unit": item.unit,
+                "derivation": (
+                    item.derivation.model_dump(mode="json") if item.derivation is not None else None
+                ),
+            }
+            for item in claims
+        ]
+
+    @staticmethod
+    def _context_with_summary(state: AgentState, messages: list[BaseMessage]) -> list[BaseMessage]:
+        """Prepend the rolling conversation summary, standing in for pruned older messages.
+
+        `load_memory` prunes messages older than `memory_turn_threshold` turns and replaces them
+        with `conversation_summary`, but until now nothing ever read that summary back — a long
+        conversation's early context (open referents, stated preferences) was silently discarded
+        the moment it aged out, with nothing to replace it in what `classify`/`resolve` see.
+        """
+        summary = state.get("conversation_summary", "")
+        if not summary:
+            return messages
+        return [SystemMessage(content=f"Summary of earlier conversation: {summary}"), *messages]
+
     async def load_memory(self, state: AgentState) -> dict[str, object]:
         messages = state.get("messages", [])
         summary = state.get("conversation_summary", "")
@@ -266,7 +306,9 @@ class AgentGraph:
 
     async def classify_task(self, state: AgentState) -> dict[str, object]:
         started = time.monotonic()
-        context = cast(list[BaseMessage], list(state.get("messages", [])[:-1]))
+        context = self._context_with_summary(
+            state, cast(list[BaseMessage], list(state.get("messages", [])[:-1]))
+        )
         deterministic = is_source_support_query(state["user_query"])
         classification = (
             TaskClassification(
@@ -312,7 +354,9 @@ class AgentGraph:
 
     async def resolve_query(self, state: AgentState) -> dict[str, object]:
         started = time.monotonic()
-        context = cast(list[BaseMessage], list(state.get("messages", [])[:-1]))
+        context = self._context_with_summary(
+            state, cast(list[BaseMessage], list(state.get("messages", [])[:-1]))
+        )
         if state["task_type"] == "source_support":
             turn, clarification = select_source_support_turn(
                 state["user_query"], state.get("validated_claim_history", [])
@@ -371,7 +415,23 @@ class AgentGraph:
             and target_names
             and missing_targets
         )
-        if target_guard_applied:
+        # A resolved query can name every target (missing_targets empty, so target_guard_applied
+        # is false) while still losing the comparative framing itself — e.g. rewriting "How does
+        # that compare with Odisha?" to "What was the literacy rate in Karnataka and Odisha in
+        # 2011?", which states both values but reads as a plain joint lookup. extract_calculations
+        # (called later, for any task_type=="comparison") is given exactly this resolved_query
+        # text and reasonably finds nothing to compute from it, yet the response-invariant check
+        # in _response_invariant_errors unconditionally requires a derived claim whenever
+        # task_type=="comparison" regardless — an unwinnable combination that produced a citation-
+        # validation refusal on an otherwise fully answerable comparison (reproduced live
+        # 2026-09-23 against the real stack, trace ae431530-1ea5-4560-ab90-94af6b1f782a). Unlike
+        # target_guard_applied, this must fire whenever task_type=="comparison", not only when a
+        # target name specifically went missing, since extract_calculations needs the framing
+        # every time it runs.
+        comparison_framing_needed = bool(
+            state["task_type"] == "comparison" and target_names and not target_guard_applied
+        )
+        if target_guard_applied or comparison_framing_needed:
             resolved_query = (
                 f"{resolved.query.rstrip()} Compare the same metric, year, population category, "
                 f"and units across these targets: {', '.join(target_names)}."
@@ -416,6 +476,7 @@ class AgentGraph:
                     requires_clarification=requires_clarification,
                     query=resolved_query,
                     target_guard_applied=target_guard_applied,
+                    comparison_framing_needed=comparison_framing_needed,
                     missing_targets=missing_targets,
                     latency_ms=(time.monotonic() - started) * 1000,
                 ),
@@ -497,7 +558,7 @@ class AgentGraph:
             task_type,
         )
         return {
-            "plan": AgentPlan(steps=steps, retrieval_top_k=20, capability_pending=artifact),
+            "plan": AgentPlan(steps=steps, retrieval_top_k=20),
             "artifact_requirement": requirement,
             "trace_events": [
                 *state.get("trace_events", []),
@@ -1136,28 +1197,10 @@ class AgentGraph:
                     ),
                 ],
             }
-        if state["task_type"] in {"artifact_chart", "artifact_table"}:
-            artifact_type: Literal["chart", "table"] = (
-                "chart" if state["task_type"] == "artifact_chart" else "table"
-            )
-            response = DraftAnswer(
-                answer_markdown=(
-                    f"The {artifact_type} request was understood, but artifact execution is "
-                    "pending implementation in Prompt 5."
-                ),
-                claims=[],
-                refusal=False,
-            )
-            return {
-                "draft_answer": response,
-                "artifacts": [
-                    ArtifactResult(
-                        status="capability_pending",
-                        artifact_type=artifact_type,
-                        message="Artifact execution is pending Prompt 5.",
-                    )
-                ],
-            }
+        # Note: state["task_type"] is never "artifact_chart"/"artifact_table" here — the
+        # `_evidence_route` conditional edge (see `build`) always sends those task types to
+        # `prepare_artifact` instead of this node when evidence is sufficient, and to
+        # `graceful_response` otherwise. `synthesize` only ever runs for the remaining task types.
         draft = await self.model.synthesize(
             state["resolved_query"],
             state["task_type"],
@@ -1181,27 +1224,7 @@ class AgentGraph:
                     "synthesize",
                     claim_count=len(draft.claims),
                     refusal=draft.refusal,
-                    claims=[
-                        {
-                            "claim_id": item.claim_id,
-                            "text": item.text[:500],
-                            "evidence_ids": item.evidence_ids,
-                            "document_derived": item.document_derived,
-                            "metric": item.metric,
-                            "region": item.region,
-                            "year": item.year,
-                            "population_scope": item.population_scope,
-                            "residence_scope": item.residence_scope,
-                            "value": item.value,
-                            "unit": item.unit,
-                            "derivation": (
-                                item.derivation.model_dump(mode="json")
-                                if item.derivation is not None
-                                else None
-                            ),
-                        }
-                        for item in draft.claims
-                    ],
+                    claims=self._claim_trace_dicts(draft.claims),
                     answer_preview=draft.answer_markdown[:500],
                 ),
             ],
@@ -1262,6 +1285,31 @@ class AgentGraph:
                 retry_count=0,
                 diagnostics={"failure_stage": "requirement_validation"},
             )
+        if self.execution_queue is not None:
+            # Fail fast, before spending the proposal (and later, code-generation) model calls,
+            # when the executor is already known to be unreachable — matching the same heartbeat
+            # threshold `/health/executor` uses. Without this, a down executor was only discovered
+            # after `execute_artifact`'s own wait times out (`execution_timeout_seconds + 5`,
+            # ~35s), by which point classify/resolve/retrieve/assess and this proposal call had
+            # already run.
+            heartbeat_age = self.execution_queue.heartbeat_age_seconds()
+            if heartbeat_age is None or heartbeat_age >= EXECUTOR_HEARTBEAT_HEALTHY_SECONDS:
+                raise AgentOperationalError(
+                    code="EXECUTOR_UNAVAILABLE",
+                    node="prepare_artifact",
+                    message=(
+                        "Artifact preparation is unavailable because the executor is unreachable."
+                    ),
+                    retryable=True,
+                    elapsed_seconds=None,
+                    configured_timeout_seconds=None,
+                    retry_count=0,
+                    diagnostics={
+                        "failure_stage": "executor_preflight",
+                        "heartbeat_age_seconds": heartbeat_age,
+                        "executor_submitted": False,
+                    },
+                )
         selected_evidence = state.get("selected_evidence", [])
         try:
             validate_trusted_artifact_evidence(selected_evidence)
@@ -1439,6 +1487,52 @@ class AgentGraph:
                         "executor_submitted": False,
                     },
                 )
+            # The proposal prompt already instructs the model to exclude the state/UT aggregate
+            # total row (see `propose_artifact_dataset`'s row_instruction). This is a defensive
+            # net for when it does so anyway. A state aggregate is always larger (for a "which
+            # district is lowest" query, always smaller-scoped math aside, still not an
+            # individual entity) than any real per-district figure it aggregates, so leaving it in
+            # the ranking pool risks it winning outright and refusing an otherwise fully valid
+            # request. Dropping it before ranking — rather than refusing only when it happens to
+            # win — makes the guard's effect (only individual entities are ever ranked) match its
+            # documented intent unconditionally, not just in the case that was easy to detect.
+            state_region = selected_evidence[0].region if selected_evidence else None
+            if state_region:
+                individual_rows = [
+                    row
+                    for row in dataset.rows
+                    if str(row["label"]).casefold() != state_region.casefold()
+                ]
+                if len(individual_rows) != len(dataset.rows):
+                    kept_row_ids = {str(row["row_id"]) for row in individual_rows}
+                    dataset = dataset.model_copy(
+                        update={
+                            "rows": individual_rows,
+                            "source_records": [
+                                source
+                                for source in dataset.source_records
+                                if source.row_id in kept_row_ids
+                            ],
+                        }
+                    )
+            if not dataset.rows:
+                raise AgentOperationalError(
+                    code="MODEL_OUTPUT_INVALID",
+                    node="prepare_artifact",
+                    message=(
+                        "Artifact preparation failed because no individual-entity rows remained "
+                        "after excluding the state/UT aggregate total."
+                    ),
+                    retryable=False,
+                    elapsed_seconds=None,
+                    configured_timeout_seconds=None,
+                    retry_count=0,
+                    diagnostics={
+                        "failure_stage": "ranking_aggregate_row_guard",
+                        "reason_code": "RANKING_NO_INDIVIDUAL_ROWS",
+                        "executor_submitted": False,
+                    },
+                )
             reverse = requirement.rank_direction != "min"
             sorted_rows = sorted(
                 dataset.rows, key=lambda row: cast(float, row["value"]), reverse=reverse
@@ -1451,26 +1545,6 @@ class AgentGraph:
                 update={"rows": sorted_rows, "source_records": sorted_sources}
             )
             winner_row = sorted_rows[0]
-            state_region = selected_evidence[0].region if selected_evidence else None
-            if state_region and str(winner_row["label"]).casefold() == state_region.casefold():
-                raise AgentOperationalError(
-                    code="MODEL_OUTPUT_INVALID",
-                    node="prepare_artifact",
-                    message=(
-                        "Artifact preparation failed because the ranked row was the state/UT "
-                        "total rather than an individual entity."
-                    ),
-                    retryable=False,
-                    elapsed_seconds=None,
-                    configured_timeout_seconds=None,
-                    retry_count=0,
-                    diagnostics={
-                        "failure_stage": "ranking_aggregate_row_guard",
-                        "reason_code": "RANKING_INCLUDES_AGGREGATE_ROW",
-                        "winning_label": str(winner_row["label"]),
-                        "executor_submitted": False,
-                    },
-                )
             ranking_winner = next(
                 source for source in dataset.source_records if source.row_id == winner_row["row_id"]
             )
@@ -1977,27 +2051,7 @@ class AgentGraph:
                     "repair",
                     claim_count=len(repaired.claims),
                     refusal=repaired.refusal,
-                    claims=[
-                        {
-                            "claim_id": item.claim_id,
-                            "text": item.text[:500],
-                            "evidence_ids": item.evidence_ids,
-                            "document_derived": item.document_derived,
-                            "metric": item.metric,
-                            "region": item.region,
-                            "year": item.year,
-                            "population_scope": item.population_scope,
-                            "residence_scope": item.residence_scope,
-                            "value": item.value,
-                            "unit": item.unit,
-                            "derivation": (
-                                item.derivation.model_dump(mode="json")
-                                if item.derivation is not None
-                                else None
-                            ),
-                        }
-                        for item in repaired.claims
-                    ],
+                    claims=self._claim_trace_dicts(repaired.claims),
                     answer_preview=repaired.answer_markdown[:500],
                 ),
             ],

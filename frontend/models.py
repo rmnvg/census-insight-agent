@@ -73,17 +73,11 @@ class ArtifactSummary(StrictModel):
     download_url: str
 
 
-class PendingArtifact(StrictModel):
-    status: Literal["capability_pending"]
-    artifact_type: Literal["chart", "table"]
-    message: str
-
-
 class ChatResponse(StrictModel):
     answer: str
     claims: list[Claim] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
-    artifacts: list[ArtifactSummary | PendingArtifact] = Field(default_factory=list)
+    artifacts: list[ArtifactSummary] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     refusal: bool = False
     trace_id: str

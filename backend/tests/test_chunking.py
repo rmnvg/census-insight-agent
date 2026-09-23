@@ -53,6 +53,55 @@ def test_table_splits_only_between_rows() -> None:
     assert all(line.count("|") >= 3 for chunk in chunks for line in chunk.text.splitlines())
 
 
+def test_table_split_repeats_a_sub_header_row_on_every_fragment() -> None:
+    # Mirrors the real "Statement 6: Sex Ratio ... by residence" table shape: a top-level
+    # year-group header spanning three blank-labeled columns, a separator, then a genuine
+    # sub-header row (Total/Rural/Urban) that must survive onto every split fragment, not just
+    # the first — see `_leading_header_line_count`'s docstring for why this matters.
+    header = "| State/District Code | State/District | Sex Ratio 2011 | | |"
+    separator = "|---|---|---|---|---|"
+    sub_header = "| | | Total | Rural | Urban |"
+    rows = "\n".join(
+        f"| {400 + index} | District {index} | {900 + index} | {901 + index} | {902 + index} |"
+        for index in range(20)
+    )
+    table = f"{header}\n{separator}\n{sub_header}\n{rows}"
+    chunks = chunk_pages(
+        [sample_page(1, table)],
+        document_title="Doc",
+        region="Madhya Pradesh",
+        source_checksum="sum",
+        config=ChunkingConfig(max_characters=220, overlap_characters=20),
+    )
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        lines = chunk.text.splitlines()
+        assert lines[0] == header
+        assert lines[1] == separator
+        assert lines[2] == sub_header
+
+
+def test_table_split_header_detection_stops_at_the_first_numeric_row() -> None:
+    # A single-header-row table (no genuine sub-header) must keep splitting exactly as before:
+    # the first data row's own numeric cell should stop header growth at the usual 2 lines.
+    table = "| District | Value |\n|---|---|\n" + "\n".join(
+        f"| District {index} | {index} |" for index in range(20)
+    )
+    chunks = chunk_pages(
+        [sample_page(1, table)],
+        document_title="Doc",
+        region="Region",
+        source_checksum="sum",
+        config=ChunkingConfig(max_characters=180, overlap_characters=20),
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk.text.splitlines()[2] != "|---|---|" for chunk in chunks)
+    for chunk in chunks:
+        assert chunk.text.splitlines()[2].startswith("| District")
+
+
 def test_citation_snippet_is_verbatim_non_heading_evidence() -> None:
     chunks = chunk_pages(
         [sample_page(1, "# Heading\n\nThe district population is exactly 150 residents.")],

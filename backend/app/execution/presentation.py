@@ -80,8 +80,24 @@ def artifact_response(
         direction_word = "lowest" if rank_direction == "min" else "highest"
         unit_suffix = f" {ranking_winner.unit}" if ranking_winner.unit else ""
         metric = ranking_winner.metric or "value"
+        # `dataset.rows` still holds every ranked entity (see prepare_artifact — the sorted
+        # dataset is never truncated to the winner), so a genuine tie for the winning value is
+        # detectable here without any new field threaded through the contract. Silently naming
+        # only one entity as "the highest" would overclaim uniqueness the underlying data doesn't
+        # support, even though the full table/chart artifact itself always shows every tied row.
+        tied_labels = [
+            str(row["label"])
+            for row in dataset.rows
+            if row.get("row_id") != ranking_winner.row_id
+            and row.get("value") == ranking_winner.normalized_numeric_value
+        ]
+        subject = (
+            f"{ranking_winner.region} tied with {', '.join(tied_labels)} for"
+            if tied_labels
+            else f"{ranking_winner.region} recorded"
+        )
         lead = (
-            f"{ranking_winner.region} recorded the {direction_word} {metric} "
+            f"{subject} the {direction_word} {metric} "
             f"({ranking_winner.raw_value}{unit_suffix}) among {dataset.title}. "
         )
     return AgentResponse(

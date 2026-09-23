@@ -18,15 +18,27 @@ from executor.policy import validate_code
 STREAM_LIMIT = 64 * 1024
 
 
-def _limits() -> None:
-    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-    # macOS does not support this Linux address-space limit reliably. Production runs in
-    # Linux Docker with both RLIMIT_AS and the container memory limit; host runs are dev-only.
-    if sys.platform == "linux":
-        resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (24 * 1024 * 1024, 24 * 1024 * 1024))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-    os.setsid()
+def _apply_limits(pid: int) -> None:
+    """Set resource limits on the child from the parent, after Popen returns.
+
+    This used to run as a `preexec_fn` executed in the child between fork() and exec(). The
+    worker's own heartbeat thread (see worker.py) runs concurrently with every job, and Python's
+    docs warn that `preexec_fn` is unsafe in a multi-threaded process: fork() only duplicates the
+    calling thread, so if any CPython-internal lock (import lock, GIL-adjacent state) happened to
+    be held by the heartbeat thread at fork time, the forked child could deadlock trying to
+    acquire it before ever reaching exec(). `resource.prlimit` sets the same limits on the
+    already-running child by PID from the parent instead, which has no fork-time interaction with
+    other threads at all. `resource.prlimit` does not exist in the `resource` module on macOS at
+    all (not just RLIMIT_AS, which was already Linux-only before this change), so macOS dev runs
+    now apply no process-level resource limits — container memory/CPU/pids limits still bound
+    production, and "host runs are dev-only" was already the documented posture for RLIMIT_AS.
+    """
+    if sys.platform != "linux":
+        return
+    resource.prlimit(pid, resource.RLIMIT_CPU, (30, 30))
+    resource.prlimit(pid, resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
+    resource.prlimit(pid, resource.RLIMIT_FSIZE, (24 * 1024 * 1024, 24 * 1024 * 1024))
+    resource.prlimit(pid, resource.RLIMIT_NOFILE, (64, 64))
 
 
 def _capture(process: subprocess.Popen[bytes], timeout: float) -> tuple[bytes, bytes, bool, bool]:
@@ -115,8 +127,9 @@ def execute_request(request: ExecutionRequest, job_dir: Path) -> ExecutionResult
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            preexec_fn=_limits,
+            start_new_session=True,
         )
+        _apply_limits(process.pid)
         stdout_bytes, stderr_bytes, timed_out, exceeded = _capture(process, request.timeout_seconds)
         stdout, stdout_truncated = _bounded(stdout_bytes)
         stderr, stderr_truncated = _bounded(stderr_bytes)

@@ -54,9 +54,89 @@ FORBIDDEN_ATTRIBUTES = {
     "touch",
     "glob",
     "rglob",
+    # `"{0.__class__}".format(x)`-style templates do their own dotted-attribute traversal at
+    # runtime inside str.format(), invisible to the dunder/attribute checks below (which only see
+    # real ast.Attribute nodes) and a known sandbox-escape technique (walking to
+    # object.__subclasses__() and beyond). f-strings remain available: their interpolated
+    # expressions are real ast.Attribute nodes and stay fully covered by this visitor.
+    "format",
+}
+# Referencing these as an attribute anywhere (e.g. `pd.io.common.os`, `np.testing.sys`) reaches a
+# module capable of process/network/filesystem escape without ever writing an `import` statement,
+# bypassing the ALLOWED_IMPORTS check entirely. Block the attribute name itself, not just specific
+# functions found on it, so this closes by module identity rather than by an enumerable function
+# list (execv, posix_spawn, system, popen, ... are all reachable through `os` alone).
+FORBIDDEN_MODULE_ATTRIBUTES = {
+    "os",
+    "sys",
+    "subprocess",
+    "importlib",
+    "ctypes",
+    "socket",
+    "shutil",
+    "pickle",
+    "multiprocessing",
+    "pty",
+    "platform",
+    "sysconfig",
+    "webbrowser",
+    "http",
+    "urllib",
+    "ftplib",
+    "runpy",
+    "pdb",
+    "code",
+    "codeop",
 }
 MAX_CODE_BYTES = 100_000
 WRITE_METHODS = {"write_text", "write_bytes", "to_csv", "savefig", "save", "savetxt"}
+# `Path("input.json").read_text()`/`.read_bytes()` is the sanctioned input pattern (see
+# `_validate_open_call` for the equivalent `open()` rule); the receiver must resolve to exactly
+# that path, mirroring the write-side literal-path requirement below.
+READ_PATH_METHODS = {"read_text", "read_bytes"}
+# pandas/numpy reader functions accept a path as their first argument but, unlike open()/Path(),
+# were previously never checked at all: any path expression — including one deliberately built at
+# runtime (e.g. `chr(47) + "etc" + chr(47) + "hosts"`) to dodge the literal-string-constant check
+# below — could reach arbitrary container-local files. None of these are part of the documented
+# input contract (`Path("input.json").read_text()` + `json.loads`), so the first argument must
+# resolve to exactly `input.json`, the same rule `open()` already enforces for reads.
+READ_FUNCTION_METHODS = {
+    "read_csv",
+    "read_excel",
+    "read_json",
+    "read_parquet",
+    "read_html",
+    "read_pickle",
+    "read_table",
+    "read_fwf",
+    "read_xml",
+    "read_sql",
+    "read_feather",
+    "read_orc",
+    "read_stata",
+    "read_sas",
+    "read_spss",
+    "read_clipboard",
+    # Deliberately excludes "load": json.load(file_object) — the sanctioned input pattern this
+    # policy must keep allowing — takes an open file object, not a path, and collides with the
+    # same attribute name on numpy. numpy's other readers below don't collide with anything in
+    # ALLOWED_IMPORTS.
+    "loadtxt",
+    "genfromtxt",
+    "fromfile",
+    "imread",
+}
+# Same reasoning as WRITE_METHODS, for writer functions that take their destination as the first
+# argument rather than as the method receiver.
+WRITE_FUNCTION_METHODS = {
+    "to_json",
+    "to_html",
+    "to_excel",
+    "to_parquet",
+    "savez",
+    "savez_compressed",
+    "tofile",
+}
 
 
 @dataclass(frozen=True)
@@ -70,6 +150,10 @@ class _PolicyVisitor(ast.NodeVisitor):
         self.errors: list[str] = []
         self.known_paths: dict[str, PurePosixPath] = {}
         self.binding_counts = binding_counts
+        # Local name -> top-level module name, from `import numpy as np`-style statements only.
+        # Used to gate `np.load(...)` without also flagging `json.load(file_object)` (a different
+        # function on a different module that happens to share the attribute name "load").
+        self.import_aliases: dict[str, str] = {}
 
     def visit_Assign(self, node: ast.Assign) -> None:
         resolved = self._resolve_path(node.value)
@@ -127,8 +211,11 @@ class _PolicyVisitor(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
-            if alias.name.split(".")[0] not in ALLOWED_IMPORTS:
+            top = alias.name.split(".")[0]
+            if top not in ALLOWED_IMPORTS:
                 self.errors.append(f"Forbidden import: {alias.name}")
+            else:
+                self.import_aliases[alias.asname or top] = top
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -158,6 +245,60 @@ class _PolicyVisitor(ast.NodeVisitor):
             )
             if not self._is_output_path(path_node):
                 self.errors.append(f"Write path must be a literal output path: {node.func.attr}")
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in READ_PATH_METHODS
+            and self._resolve_path(node.func.value) != PurePosixPath("input.json")
+        ):
+            self.errors.append(f"Read path must be exactly input.json: {node.func.attr}")
+        read_name = (
+            node.func.attr
+            if isinstance(node.func, ast.Attribute) and node.func.attr in READ_FUNCTION_METHODS
+            else node.func.id
+            if isinstance(node.func, ast.Name) and node.func.id in READ_FUNCTION_METHODS
+            else None
+        )
+        if read_name is not None:
+            target = node.args[0] if node.args else None
+            if self._resolve_path(target) != PurePosixPath("input.json"):
+                self.errors.append(f"Read path must be exactly input.json: {read_name}")
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "load"
+            and isinstance(node.func.value, ast.Name)
+            and self.import_aliases.get(node.func.value.id) == "numpy"
+        ):
+            target = node.args[0] if node.args else None
+            if self._resolve_path(target) != PurePosixPath("input.json"):
+                self.errors.append("Read path must be exactly input.json: load")
+        # `matplotlib.use(backend)` accepts an arbitrary "module://..." string and dynamically
+        # imports it — a dynamic-import primitive independent of the ALLOWED_IMPORTS check above.
+        # MPLBACKEND=Agg is already set in the executor's environment, so generated code never
+        # legitimately needs to call it. Gated to the bare `matplotlib` (or its aliased) module
+        # specifically — not a generic "use" attribute name — because `matplotlib.style.use(...)`
+        # (and `<alias>.style.use(...)`) is a completely different, harmless style-sheet function
+        # that happens to share the method name, and the codegen prompt's own "deterministic
+        # style" requirement makes it a plausible, legitimate thing for generated code to call
+        # (reproduced live 2026-09-23: a real generated chart program was rejected for exactly
+        # this false positive before this fix narrowed the check).
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "use"
+            and isinstance(node.func.value, ast.Name)
+            and self.import_aliases.get(node.func.value.id) == "matplotlib"
+        ):
+            self.errors.append("Forbidden attribute call: use")
+        write_name = (
+            node.func.attr
+            if isinstance(node.func, ast.Attribute) and node.func.attr in WRITE_FUNCTION_METHODS
+            else node.func.id
+            if isinstance(node.func, ast.Name) and node.func.id in WRITE_FUNCTION_METHODS
+            else None
+        )
+        if write_name is not None:
+            target = node.args[0] if node.args else None
+            if not self._is_output_path(target):
+                self.errors.append(f"Write path must be a literal output path: {write_name}")
         if isinstance(node.func, ast.Name) and node.func.id == "Path":
             self._validate_path_argument(node)
         self.generic_visit(node)
@@ -165,6 +306,8 @@ class _PolicyVisitor(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr.startswith("__") or node.attr.endswith("__"):
             self.errors.append(f"Dunder access is forbidden: {node.attr}")
+        if node.attr in FORBIDDEN_MODULE_ATTRIBUTES:
+            self.errors.append(f"Forbidden module reference: {node.attr}")
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:

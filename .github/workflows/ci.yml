@@ -30,3 +30,13 @@ jobs:
           GOOGLE_CLOUD_PROJECT: offline-ci
           GOOGLE_CREDENTIALS_HOST_PATH: /tmp/offline-ci-adc.json
         run: docker compose config --quiet
+      # Build (never run) each service image. This needs no credentials — only `docker compose up`
+      # does — and catches Dockerfile/dependency-group breakage (e.g. a package silently missing
+      # from an extra) that `make check`'s host-venv tests, which install `--all-extras` together,
+      # cannot see.
+      - name: Build backend image
+        run: docker build -f backend/Dockerfile -t census-backend-ci .
+      - name: Build frontend image
+        run: docker build -f frontend/Dockerfile -t census-frontend-ci .
+      - name: Build executor image
+        run: docker build -f executor/Dockerfile -t census-executor-ci .

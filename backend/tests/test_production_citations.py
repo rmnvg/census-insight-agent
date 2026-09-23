@@ -51,5 +51,15 @@ def test_all_production_dry_run_chunks_have_verbatim_citations_without_external_
 
     validate_chunks_for_indexing(chunks)
     invalid = [chunk for chunk in chunks if chunk.metadata.citation_snippet not in chunk.text]
-    assert len(chunks) == 2058
+    # 2058 -> 2112 after `_leading_header_line_count` (chunking.py) started repeating a table's
+    # sub-header row (e.g. "Total | Rural | Urban") on every split fragment, not just the first —
+    # verified live against this real corpus: 600 chunks across 65 pages now carry that row, where
+    # only the first fragment of each such page used to. Repeating more header text per fragment
+    # leaves less room for data rows before `max_characters`, so some tables now split into a few
+    # more fragments than before; this is the expected shape of the fix, not drift. The live
+    # Qdrant collection still holds 2058 points from before this fix — `make verify-offline`
+    # (`--expected-points 2058` in the Makefile) intentionally still checks against that until a
+    # deliberate, billable re-ingest (`scripts/initialize_corpus.py --allow-paid-calls --rebuild`)
+    # is run to replace it; do not "fix" that number to 2112 without also actually re-ingesting.
+    assert len(chunks) == 2112
     assert invalid == []

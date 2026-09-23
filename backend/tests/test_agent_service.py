@@ -1,15 +1,19 @@
 import asyncio
+import json
 import warnings
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel
 
 from backend.app.agent.checkpoint import CHECKPOINT_SCHEMA_VERSION
 from backend.app.agent.graph import AgentGraph
 from backend.app.agent.models import (
+    AgentState,
     CalculationRequest,
     CalculationResult,
     DraftAnswer,
@@ -291,6 +295,41 @@ class DroppedComparisonTargetModel(FakeModel):
         )
 
 
+class FramingLostComparisonModel(FakeModel):
+    """Names every target but rewrites away the comparative framing itself.
+
+    Reproduces a real live failure (trace ae431530-1ea5-4560-ab90-94af6b1f782a, 2026-09-23): a
+    "How does that compare with Odisha?" follow-up resolved to a query that states both values
+    without asking for a computed difference, so extract_calculations found nothing to compute
+    and the response-invariant check then refused the whole turn for lacking a derived claim.
+    """
+
+    async def resolve(self, query: str, context: list[Any]) -> ResolvedQuery:
+        del query, context
+        return ResolvedQuery(
+            query="What was the literacy rate in Karnataka and Odisha in 2011?",
+            task_type="comparison",
+            regions=["Karnataka", "Odisha"],
+        )
+
+
+class ContextCapturingModel(FakeModel):
+    """Records the context list it was actually called with, to inspect what reached the model."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.classify_context: list[Any] | None = None
+        self.resolve_context: list[Any] | None = None
+
+    async def classify(self, query: str, context: list[Any]) -> TaskClassification:
+        self.classify_context = context
+        return await super().classify(query, context)
+
+    async def resolve(self, query: str, context: list[Any]) -> ResolvedQuery:
+        self.resolve_context = context
+        return ResolvedQuery(query=query, task_type="lookup")
+
+
 class NoModelCalls:
     def __getattr__(self, name: str) -> Any:
         async def fail(*args: Any, **kwargs: Any) -> Any:
@@ -352,14 +391,30 @@ class FakeTools:
 
 
 def settings(tmp_path: Path) -> Settings:
-    return Settings.model_validate(
+    # `execution_queue_root` deliberately isolated under `tmp_path` alongside the other roots:
+    # its Settings default is a relative path ("workspace/execution-queue"), so without this
+    # override every AgentService built by this helper shared the real repository's
+    # `workspace/execution-queue` — including its `heartbeat.json`, left behind by real
+    # `docker compose` runs — across every test in this module and every other module using this
+    # same helper.
+    queue_root = tmp_path / "workspace" / "execution-queue"
+    result = Settings.model_validate(
         {
             "google_cloud_project": "test-project",
             "workspace_root": tmp_path / "workspace",
             "skills_dir": tmp_path / "skills",
             "data_root": tmp_path / "data",
+            "execution_queue_root": queue_root,
         }
     )
+    # Simulate a live, healthy executor by default (a fresh, current heartbeat), matching the
+    # normal running-stack condition these tests otherwise assume; a test that specifically wants
+    # to exercise executor-unavailability can still remove or backdate this file itself.
+    queue_root.mkdir(parents=True, exist_ok=True)
+    (queue_root / "heartbeat.json").write_text(
+        json.dumps({"status": "ok", "updated_at": datetime.now(UTC).isoformat()}), encoding="utf-8"
+    )
+    return result
 
 
 def test_lookup_memory_survives_reconstruction_and_sessions_are_isolated(tmp_path: Path) -> None:
@@ -517,6 +572,82 @@ def test_comparison_resolution_cannot_drop_a_classified_target(tmp_path: Path) -
     event = cast(list[TraceEvent], result["trace_events"])[-1]
     assert event.details["target_guard_applied"] is True
     assert event.details["missing_targets"] == ["Karnataka"]
+
+
+def test_comparison_resolution_restores_framing_when_targets_are_present_but_framing_is_lost(
+    tmp_path: Path,
+) -> None:
+    graph = AgentGraph(
+        FramingLostComparisonModel(),
+        FakeTools(SkillRegistry(tmp_path / "skills")),
+    )
+    classification = TaskClassification(
+        task_type="comparison",
+        regions=["Karnataka", "Odisha"],
+        reason="Cross-region comparison",
+    )
+
+    result = run(
+        graph.resolve_query(
+            {
+                "user_query": "How does that compare with Odisha?",
+                "task_type": "comparison",
+                "classification": classification,
+                "messages": [],
+            }
+        )
+    )
+
+    resolved = cast(str, result["resolved_query"])
+    assert "compare" in resolved.casefold()
+    assert all(target in resolved.casefold() for target in ("karnataka", "odisha"))
+    event = cast(list[TraceEvent], result["trace_events"])[-1]
+    # The model already named both targets, so the missing-target guard must not fire — this is
+    # specifically the framing guard, a distinct condition from it.
+    assert event.details["target_guard_applied"] is False
+    assert event.details["missing_targets"] == []
+    assert event.details["comparison_framing_needed"] is True
+
+
+def test_conversation_summary_reaches_classify_and_resolve_context(tmp_path: Path) -> None:
+    # `load_memory` prunes old messages and stores their replacement in `conversation_summary`;
+    # this checks that summary actually reaches the model instead of being silently discarded.
+    model = ContextCapturingModel()
+    graph = AgentGraph(model, FakeTools(SkillRegistry(tmp_path / "skills")))
+    state = {
+        "user_query": "What was the literacy rate?",
+        "task_type": "lookup",
+        "classification": TaskClassification(task_type="lookup", reason="Lookup"),
+        "messages": [],
+        "conversation_summary": (
+            "The user previously asked about Karnataka and prefers percentages."
+        ),
+    }
+
+    run(graph.classify_task(cast(AgentState, state)))
+    assert model.classify_context is not None
+    assert len(model.classify_context) == 1
+    assert isinstance(model.classify_context[0], SystemMessage)
+    assert "Karnataka" in model.classify_context[0].content
+
+    run(graph.resolve_query(cast(AgentState, state)))
+    assert model.resolve_context is not None
+    assert len(model.resolve_context) == 1
+    assert isinstance(model.resolve_context[0], SystemMessage)
+
+
+def test_no_summary_leaves_context_untouched(tmp_path: Path) -> None:
+    model = ContextCapturingModel()
+    graph = AgentGraph(model, FakeTools(SkillRegistry(tmp_path / "skills")))
+    state = {
+        "user_query": "What was the literacy rate?",
+        "task_type": "lookup",
+        "classification": TaskClassification(task_type="lookup", reason="Lookup"),
+        "messages": [],
+        "conversation_summary": "",
+    }
+    run(graph.classify_task(cast(AgentState, state)))
+    assert model.classify_context == []
 
 
 def test_ambiguous_followup_and_out_of_scope_are_graceful(tmp_path: Path) -> None:

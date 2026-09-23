@@ -10,7 +10,6 @@ from backend.app.agent.models import (
     AgentState,
     AnswerClaim,
     ArtifactDataRequirement,
-    ArtifactResult,
     CalculationResult,
     Citation,
     DraftAnswer,
@@ -100,15 +99,7 @@ def hydrate_agent_state(raw: AgentState | dict[str, Any]) -> AgentState:
         if key in state:
             state[key] = _models(state[key], model)
     if "artifacts" in state:
-        state["artifacts"] = [
-            _model(
-                item,
-                ArtifactDescriptor
-                if isinstance(item, dict) and "artifact_id" in item
-                else ArtifactResult,
-            )
-            for item in state["artifacts"]
-        ]
+        state["artifacts"] = _models(state["artifacts"], ArtifactDescriptor)
     return cast(AgentState, state)
 
 

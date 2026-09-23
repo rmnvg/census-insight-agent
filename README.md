@@ -8,7 +8,7 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-agent%20orchestration-1C3C3C)
 ![Qdrant](https://img.shields.io/badge/Qdrant-hybrid%20RRF-DC244C?logo=qdrant&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/docker%20compose-4%20services-2496ED?logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-305%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-331%20passing-brightgreen)
 
 Ask it about literacy rates, population, sex ratios, and district rankings across Karnataka, Odisha,
 and Madhya Pradesh. It looks things up, summarizes, compares, ranks, checks internal consistency,
@@ -26,6 +26,11 @@ Covers architecture, healthy services, a cited lookup, a follow-up, chart genera
 out-of-scope refusal. Model waiting time is edited out and selected frames are held for explanation.
 The follow-up comparison failed citation validation in this run; the video preserves and explains
 that result. The lookup and chart succeeded. `make check` passed all 305 tests.
+
+That specific comparison-refusal's root cause (`resolve_query` could rewrite a follow-up to name
+every target while losing the comparative framing itself, so nothing was ever computed to cite) is
+now fixed and verified live — see `FAILURE_ANALYSIS.md`. The video is kept unedited as an honest
+record of that session rather than re-recorded.
 
 The video is included in the repository. If GitHub shows a file page instead of a player, use
 **View raw** or **Download raw file** to watch it.
@@ -314,9 +319,9 @@ sandbox such as microVM isolation.
 ## Verification and evaluation
 
 A [GitHub Actions workflow](.github/workflows/ci.yml) runs the full offline gate — format, lint,
-type check, all 305 tests, an offline UI smoke test, a Compose trust-boundary audit, and a
-git-history secret scan — on every push, with no billable calls. Badge at the top of this file
-reflects the current `main` branch.
+type check, all 331 tests, an offline UI smoke test, a Compose trust-boundary audit, a
+git-history secret scan, and a build (never a run) of each service's Docker image — on every push,
+with no billable calls. Badge at the top of this file reflects the current `main` branch.
 
 Run the same gate locally:
 
@@ -337,6 +342,13 @@ make verify-offline
 Useful individual commands include `make format-check`, `make lint`, `make typecheck`, `make test`,
 `make ui-smoke`, `make qdrant-readonly`, `docker compose config --quiet`, and
 `docker compose exec frontend python -m frontend.security_check`.
+
+`workspace/checkpoints.sqlite` grows without bound — every LangGraph superstep of every turn
+writes a full state snapshot, and nothing prunes old sessions automatically. `make
+prune-checkpoints-dry-run` lists sessions inactive more than 30 days (`--older-than-days` to
+change that); `make prune-checkpoints` actually removes their checkpoints, `app_sessions` row, and
+`workspace/sessions/<id>/` trace/artifact directory. Neither command touches Qdrant or requires
+Vertex/GCP configuration.
 
 The real-corpus retrieval evaluator uses a paid Vertex query embedding and is manual:
 

@@ -97,7 +97,6 @@ class EvidenceAssessment(BaseModel):
 class AgentPlan(BaseModel):
     steps: list[str]
     retrieval_top_k: int = Field(default=10, ge=1, le=20)
-    capability_pending: bool = False
 
 
 ClaimUnit = Literal["percent", "percentage_points", "count", "ratio", "other"]
@@ -226,17 +225,11 @@ class EvidenceReference(BaseModel):
     source_checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
-class ArtifactResult(BaseModel):
-    status: Literal["capability_pending"]
-    artifact_type: Literal["chart", "table"]
-    message: str
-
-
 class AgentResponse(BaseModel):
     answer_markdown: str = Field(serialization_alias="answer")
     claims: list[AnswerClaim] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
-    artifacts: list[ArtifactResult | ArtifactDescriptor] = Field(default_factory=list)
+    artifacts: list[ArtifactDescriptor] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     refusal: bool = False
     trace_id: str
@@ -316,7 +309,7 @@ class AgentState(TypedDict, total=False):
     answer_claims: list[AnswerClaim]
     citations: list[Citation]
     limitations: list[str]
-    artifacts: list[ArtifactResult | ArtifactDescriptor]
+    artifacts: list[ArtifactDescriptor]
     tool_calls: list[ToolCallRecord]
     errors: list[str]
     retry_count: int

@@ -22,6 +22,11 @@ class ExecutorUnavailableError(RuntimeError):
     pass
 
 
+# Shared by the `/health/executor` route and `AgentGraph.prepare_artifact`'s pre-flight check, so
+# both agree on what "healthy" means.
+EXECUTOR_HEARTBEAT_HEALTHY_SECONDS = 15.0
+
+
 def atomic_json(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + f".{uuid4().hex}.tmp")

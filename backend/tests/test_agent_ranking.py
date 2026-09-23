@@ -181,7 +181,11 @@ def test_prepare_artifact_rejects_incomplete_row_coverage(tmp_path: Path) -> Non
     assert excinfo.value.diagnostics["reason_code"] == "RANKING_COVERAGE_INCOMPLETE"
 
 
-def test_prepare_artifact_rejects_state_aggregate_winner(tmp_path: Path) -> None:
+def test_prepare_artifact_excludes_state_aggregate_row_from_ranking(tmp_path: Path) -> None:
+    # Madhya Pradesh's own 800 is numerically the minimum of all four proposed rows, but it is the
+    # state/UT aggregate total, not an individual district — it must be dropped from the ranking
+    # pool entirely (not just refused when it happens to win) so "min" correctly resolves to the
+    # lowest *district*, Bhind at 828, rather than refusing an otherwise fully valid request.
     model = RankingModel(
         [
             proposed_row("Madhya Pradesh", 800),
@@ -192,9 +196,40 @@ def test_prepare_artifact_rejects_state_aggregate_winner(tmp_path: Path) -> None
     )
     value = make_graph(model, tmp_path)
     state = base_state(ranking_requirement(rank_direction="min"))
+    result = run(value.prepare_artifact(cast(AgentState, state)))
+    winner = result["ranking_winner"]
+    assert isinstance(winner, SourceRecord)
+    assert winner.region == "Bhind"
+    assert winner.normalized_numeric_value == 828
+    dataset = result["artifact_dataset"]
+    assert isinstance(dataset, ArtifactDataset)
+    assert all(row["label"] != "Madhya Pradesh" for row in dataset.rows)
+    assert len(dataset.rows) == 3
+
+
+def test_prepare_artifact_rejects_ranking_with_only_aggregate_rows(tmp_path: Path) -> None:
+    # count_table_entity_rows excludes the state row when counting, so a table with no individual
+    # district rows at all detects zero expected rows; the row-completeness guard is then a no-op
+    # (nothing to compare against) and this guard is the one that must catch an all-aggregate
+    # proposal instead of silently producing an empty, contract-violating dataset.
+    aggregate_only_text = (
+        "Statement 6: Sex Ratio (number of females per 1000 males) by residence: 2001-2011\n\n"
+        "| State/District Code | State/District | Sex Ratio 2011 | | |\n"
+        "|---|---|---|---|---|\n"
+        "| | | Total | Rural | Urban |\n"
+        "| 23 | MADHYA PRADESH | 800 | 805 | 795 |\n"
+    )
+    evidence = district_evidence().model_copy(
+        update={"text": aggregate_only_text, "citation_snippet": aggregate_only_text}
+    )
+    assert count_table_entity_rows([evidence]) == 0
+    model = RankingModel([proposed_row("Madhya Pradesh", 800, evidence.chunk_id)])
+    value = make_graph(model, tmp_path)
+    state = base_state(ranking_requirement(rank_direction="min"))
+    state["selected_evidence"] = [evidence]
     with pytest.raises(AgentOperationalError) as excinfo:
         run(value.prepare_artifact(cast(AgentState, state)))
-    assert excinfo.value.diagnostics["reason_code"] == "RANKING_INCLUDES_AGGREGATE_ROW"
+    assert excinfo.value.diagnostics["reason_code"] == "RANKING_NO_INDIVIDUAL_ROWS"
 
 
 def test_count_table_entity_rows_excludes_headers_and_state_total() -> None:
@@ -255,6 +290,70 @@ def test_artifact_response_prepends_ranking_sentence_with_citation() -> None:
         "Balaghat recorded the highest sex ratio (1021) among Sex ratio by district."
     )
     assert any(citation.snippet == "1021" for citation in response.citations)
+
+
+def test_artifact_response_names_ties_instead_of_overclaiming_uniqueness() -> None:
+    # dataset.rows always holds every ranked entity, never just the winner (see prepare_artifact),
+    # so a genuine tie is detectable from data already on hand without a new contract field.
+    winner = SourceRecord(
+        source_record_id="source-1",
+        row_id="row-1",
+        field="value",
+        raw_value="908",
+        normalized_numeric_value=908,
+        unit="",
+        metric="sex ratio",
+        region="Sheopur",
+        year=2011,
+        population_scope="persons",
+        residence_scope="total",
+        document_title="Madhya Pradesh PCA Highlights",
+        document_id="doc-mp",
+        page_number=32,
+        chunk_id="chunk-sex-ratio-1",
+        exact_supporting_quote="908",
+        source_checksum="a" * 64,
+    )
+    tied = winner.model_copy(
+        update={"source_record_id": "source-2", "row_id": "row-2", "region": "Bhind"}
+    )
+    dataset = ArtifactDataset(
+        title="Sex ratio by district",
+        task_type="artifact_table",
+        rows=[
+            {"row_id": "row-1", "label": "Sheopur", "series": "", "value": 908},
+            {"row_id": "row-2", "label": "Bhind", "series": "", "value": 908},
+            {"row_id": "row-3", "label": "Balaghat", "series": "", "value": 800},
+        ],
+        columns=["row_id", "label", "series", "value"],
+        units={"value": ""},
+        source_records=[winner, tied],
+        requested_output="Which district had the highest sex ratio?",
+    )
+    descriptor = ArtifactDescriptor(
+        artifact_id="33333333-3333-4333-8333-333333333333",
+        artifact_type="table",
+        title="Sex ratio by district",
+        filename="table.md",
+        media_type="text/markdown",
+        byte_size=10,
+        sha256="b" * 64,
+        session_id="11111111-1111-4111-8111-111111111111",
+        run_id="22222222-2222-4222-8222-222222222222",
+        source_manifest_path="/tmp/source-manifest.json",
+        download_url="/artifacts/table.md",
+    )
+    response = artifact_response(
+        dataset,
+        descriptor,
+        [district_evidence()],
+        "run-1",
+        ranking_winner=winner,
+        rank_direction="max",
+    )
+    assert response.answer_markdown.startswith(
+        "Sheopur tied with Bhind for the highest sex ratio (908) among Sex ratio by district."
+    )
 
 
 class ScrollPoint:

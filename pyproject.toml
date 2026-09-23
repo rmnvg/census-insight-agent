@@ -4,7 +4,20 @@ version = "0.1.0"
 description = "Evidence-grounded census insight services."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+# Only genuinely universal, lightweight dependencies belong here: everything in this list is
+# installed into every image (backend, frontend, executor). `pydantic` is the one real case —
+# `backend.app.execution.contracts` (typed request/result/artifact contracts) is imported directly
+# by the isolated executor, and `frontend/models.py` defines its own Pydantic models — so both
+# non-backend images need it even though neither runs the backend app itself. Everything else
+# heavy or backend-specific lives in the `backend`/`frontend`/`executor` extras below so the
+# isolated executor and the credential-less frontend don't ship FastAPI, LangGraph, the Vertex/
+# Gemini SDKs, or a Qdrant client — none of which they can reach or are meant to use.
 dependencies = [
+    "pydantic==2.13.5",
+]
+
+[project.optional-dependencies]
+backend = [
     "fastapi==0.141.1",
     "google-genai==2.22.0",
     "langchain-google-genai==4.4.0",
@@ -13,11 +26,8 @@ dependencies = [
     "pydantic-settings==2.15.0",
     "pymupdf4llm==1.28.2",
     "qdrant-client[fastembed]==1.16.2",
-    "streamlit==1.63.0",
     "uvicorn[standard]==0.52.4",
 ]
-
-[project.optional-dependencies]
 ocr = [
     "pillow==11.3.0",
 ]
@@ -32,6 +42,7 @@ frontend = [
     "httpx==0.28.1",
     "pandas==2.3.2",
     "pillow==11.3.0",
+    "streamlit==1.63.0",
 ]
 
 [dependency-groups]
