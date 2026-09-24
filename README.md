@@ -4,15 +4,20 @@
 
 [![offline-quality](https://github.com/rmnvg/census-insight-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/rmnvg/census-insight-agent/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![LangGraph](https://img.shields.io/badge/LangGraph-agent%20orchestration-1C3C3C)
 ![Qdrant](https://img.shields.io/badge/Qdrant-hybrid%20RRF-DC244C?logo=qdrant&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/docker%20compose-4%20services-2496ED?logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-331%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-400%20passing-brightgreen)
 
 Ask it about literacy rates, population, sex ratios, and district rankings across Karnataka, Odisha,
-and Madhya Pradesh. It looks things up, summarizes, compares, ranks, checks internal consistency,
-and builds charts/tables — and it says "I don't know" instead of making something up.
+and Madhya Pradesh — or upload your own report. It looks things up, summarizes, compares, ranks,
+checks internal consistency, and builds charts/tables — and it says "I don't know" instead of making
+something up.
+
+![Census Insight Agent: a cited answer with sources, in the Next.js interface](docs/screenshots/02-cited-answer.png)
 
 ## Demo video
 
@@ -35,11 +40,34 @@ record of that session rather than re-recorded.
 The video is included in the repository. If GitHub shows a file page instead of a player, use
 **View raw** or **Download raw file** to watch it.
 
+## The interface
+
+A Next.js + TypeScript client built around one idea: **every answer should be checkable in one
+click.**
+
+| | |
+|---|---|
+| ![Click a citation to open the original PDF page](docs/screenshots/03-pdf-page-viewer.png) | ![Live progress while the agent works](docs/screenshots/07-live-progress.png) |
+| **Citation → original PDF page.** Every citation chip opens the physical page of the source PDF next to the quoted evidence. | **Live progress.** Server-sent events show each LangGraph step as it starts: retrieval, evidence assessment, citation validation. |
+| ![Chart artifact with data and provenance downloads](docs/screenshots/05-chart-artifact.png) | ![Upload your own PDF](docs/screenshots/06-document-library.png) |
+| **Verified artifacts.** Charts and tables come from the network-isolated executor, with the plotted data and a provenance manifest one click away. | **Bring your own PDF.** Uploads go through the same citation-safe ingestion pipeline as the bundled reports, as a background job with live status. |
+
+- **Claude-style sessions:** a searchable, date-grouped chat history, rename and delete, and
+  shareable URLs (`/c/<session_id>`). Switch chats while one is still answering; progress continues
+  in the background.
+- **Answers that show their work:** numbered citation chips on every claim, arithmetic shown as
+  *computed in code*, a clear badge when the agent declines instead of guessing, and a per-answer
+  execution trace.
+- **Hardened by default:** the browser reaches FastAPI only through an allowlisted same-origin proxy;
+  the container is read-only, non-root, and has no credentials.
+- Dark mode, mobile layout, keyboard shortcuts (<kbd>⇧⌘O</kbd> new chat), and live service health.
+
 ---
 
 ## Table of contents
 
 - [Demo video](#demo-video)
+- [The interface](#the-interface)
 - [What makes this different](#what-makes-this-different)
 - [Architecture](#architecture)
 - [How a request actually flows](#how-a-request-actually-flows)
@@ -79,7 +107,7 @@ executor; the executor never touches the network, Qdrant, or credentials.
 ```mermaid
 flowchart LR
   subgraph P["🖥️ Presentation plane"]
-    U((User)) --> UI["Streamlit :8501"]
+    U((User)) --> UI["Next.js :3000\nallowlisted proxy"]
   end
   subgraph A["🧠 Agent / orchestration plane"]
     UI --> API["FastAPI :8000"]
@@ -116,7 +144,7 @@ bounded repair before it ever refuses.
 sequenceDiagram
     autonumber
     actor You
-    participant UI as Streamlit
+    participant UI as Next.js
     participant API as FastAPI
     participant Graph as LangGraph agent
     participant Qdrant
@@ -124,8 +152,9 @@ sequenceDiagram
     participant Exec as Isolated executor
 
     You->>UI: "Compare literacy rates, Karnataka vs Odisha"
-    UI->>API: POST /chat
+    UI->>API: POST /chat/stream
     API->>Graph: run(session_id, message)
+    Graph-->>UI: SSE progress event as each node starts
     Graph->>Gemini: classify task + resolve standalone query
     Gemini-->>Graph: task_type=comparison, targets=[Karnataka, Odisha]
     par per-target retrieval
@@ -148,8 +177,8 @@ sequenceDiagram
         Graph->>Graph: validate citations (one repair if invalid, else refuse)
         Graph-->>API: cited answer
     end
-    API-->>UI: response + trace_id
-    UI-->>You: answer · citations · "Execution details"
+    API-->>UI: result event (response + trace_id)
+    UI-->>You: cited answer · PDF page viewer · trace
 ```
 
 ## The provenance chain (the core guarantee)
@@ -190,6 +219,7 @@ the chain stops and the system says so instead of silently continuing.
 | "Check whether the population totals in this table are consistent" | `inconsistency_analysis` | Deterministic arithmetic tool calls, checked against the same citation-validation gate |
 | "Which source pages support those values?" | `source_support` | Rehydrates prior validated claims against **current** Qdrant state — never trusts conversation prose |
 | "What was France's unemployment rate in 2011?" | `out_of_scope` | Refuses cleanly — no hallucinated cross-corpus answer |
+| *Upload a PDF, then ask about it* | any of the above | Indexed through the same page-bounded, checksum-bound pipeline; the agent sees the live document catalog |
 
 ## Quick start
 
@@ -207,7 +237,7 @@ sh scripts/setup.sh --allow-paid-calls
 
 This builds images, checks source-page coverage, initializes an empty index, prepares Linux queue
 permissions, and waits for healthy services. It preserves an existing valid collection. Open
-<http://localhost:8501>. Subsequent starts need only `docker compose up -d --wait`.
+<http://localhost:3000>. Subsequent starts need only `docker compose up -d --wait`.
 The one-shot `queue-init` container exits successfully; the four application services stay running.
 Windows users should use WSL2 with Docker Desktop integration enabled.
 
@@ -280,7 +310,8 @@ four healthy services.
 
 | Service | URL |
 |---|---|
-| Streamlit chat UI | <http://localhost:8501> |
+| Next.js chat UI | <http://localhost:3000> |
+| Streamlit UI (optional, `docker compose --profile streamlit up`) | <http://localhost:8501> |
 | FastAPI / OpenAPI docs | <http://localhost:8000/docs> |
 | Qdrant dashboard | <http://localhost:6333/dashboard> |
 
@@ -319,7 +350,7 @@ sandbox such as microVM isolation.
 ## Verification and evaluation
 
 A [GitHub Actions workflow](.github/workflows/ci.yml) runs the full offline gate — format, lint,
-type check, all 331 tests, an offline UI smoke test, a Compose trust-boundary audit, a
+type check, all 360 Python tests, an offline UI smoke test, a Compose trust-boundary audit, a
 git-history secret scan, and a build (never a run) of each service's Docker image — on every push,
 with no billable calls. Badge at the top of this file reflects the current `main` branch.
 
@@ -338,6 +369,17 @@ writes, Gemini generation, or Vertex embeddings:
 ```shell
 make verify-offline
 ```
+
+The Next.js client has its own gate: type check, ESLint, Vitest unit tests (including the proxy
+allowlist), and a production build. CI runs it as a separate job:
+
+```shell
+make web-install
+make web-check
+```
+
+For UI development against a running backend, `make web-dev` serves the client with hot reload
+on <http://localhost:3000>.
 
 Useful individual commands include `make format-check`, `make lint`, `make typecheck`, `make test`,
 `make ui-smoke`, `make qdrant-readonly`, `docker compose config --quiet`, and
@@ -373,8 +415,17 @@ curl -sS -X POST http://localhost:8000/chat -H 'content-type: application/json' 
 curl -sS http://localhost:8000/runs/TRACE_ID/trace
 ```
 
-Trace IDs are allocated at request start and remain retrievable for typed failures. UI "Execution
-details" shows allowlisted operational fields only. Files under `workspace/` are ignored local state.
+Trace IDs are allocated at request start and remain retrievable for typed failures. The UI's
+trace view shows allowlisted operational fields only. Files under `workspace/` are ignored local state.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /chat/stream` | Server-sent events: `progress` per graph node, then one `result` or `error` |
+| `GET /sessions` · `GET /sessions/{id}/messages` | Chat history and a session's display transcript |
+| `PATCH /sessions/{id}` · `DELETE /sessions/{id}` | Rename; delete transcript, checkpoints, traces, and artifacts |
+| `POST /documents/upload` · `GET /documents/uploads/{job_id}` | Upload a PDF (202 + background job) and poll it |
+| `DELETE /documents/{id}` | Remove an uploaded document and its vectors (bundled corpus is protected) |
+| `GET /documents/{id}/pages/{n}?highlight=…` | Render a physical PDF page, highlighting the quote where the PDF has a text layer |
 
 ## Troubleshooting
 
@@ -386,9 +437,11 @@ details" shows allowlisted operational fields only. Files under `workspace/` are
 | UI stays pending | Rebuild frontend/backend and inspect their logs; `POST /chat` is intentionally not retried. |
 | Backend unhealthy | Verify ADC mount, project/location/model values, Qdrant, and executor heartbeat. |
 
-Known limitations: excluded visual-page content, no token streaming, no URL-based browser session
-restoration, synchronous administrative ingestion, loopback-only services without user
-authentication, and development-grade executor isolation. See [DESIGN.md](DESIGN.md) and
+Known limitations: excluded visual-page content, progress streaming by graph step rather than by
+token (answers are only released after citation validation), scanned or vector-text uploads cannot
+be indexed without OCR review, quote highlighting is unavailable for the bundled PDFs (they have no
+text layer), loopback-only services without user authentication, and development-grade executor
+isolation. See [DESIGN.md](DESIGN.md) and
 [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) for the full, honest accounting — including inputs where
 this system degrades, why, and what a real fix looks like.
 
@@ -397,7 +450,8 @@ this system degrades, why, and what a real fix looks like.
 ```text
 backend/app/       FastAPI, ingestion, retrieval, LangGraph, lineage
 backend/tests/     Unit and integration tests
-frontend/          Streamlit client, models, renderers, tests
+web/               Next.js + TypeScript client, allowlisted API proxy, Vitest tests
+frontend/          Original Streamlit client (optional Compose profile)
 executor/          Isolated worker and code policy
 skills/            Runtime Markdown skills
 data/manifests/    Pairing and reviewed coverage decisions

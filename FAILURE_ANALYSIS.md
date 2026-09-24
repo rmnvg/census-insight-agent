@@ -115,6 +115,33 @@
 - **Current mitigation:** Both the `synthesize` and `repair` prompts (`backend/app/agent/provider.py`) now explicitly forbid splitting an aggregate into a rural/urban/gender breakdown unless each part's own number is itself an explicit value in the cited evidence, not just the aggregate. Verified live after the fix: the same summary request succeeded twice in a row (11/11 and 10/10 claims cited) in subsequent harness runs.
 - **Proposed future fix:** None remaining for this specific pattern; a model could still invent a different kind of unsupported structure not covered by this specific instruction, in which case citation validation remains the backstop that prevents a wrong answer from being shown.
 
+### Uploaded region treated as an unresolved referent — fixed
+
+- **Input:** "What was the literacy rate of Northvale in 2011?", asked live on 2026-09-24 right after uploading a text-layer test report for the fictional region "Northvale" through the new document-upload endpoint.
+- **Observed behavior:** Upload, indexing, and the document catalog all succeeded, but the agent replied with a clarification ("Could you please provide a valid region name or document ID for 'Northvale'?") instead of answering. The trace showed `task_classification` → `clarification` with no retrieval at all.
+- **Root cause:** The classifier and resolver prompts described the corpus only as "supplied Indian Census reports" and never listed the supplied documents, so region validity came entirely from the model's world knowledge. The three bundled states worked only because the model already knew they were Indian states.
+- **Safety impact:** None; the agent asked rather than guessed. The impact was availability for any uploaded report whose region the model does not recognise.
+- **Current mitigation:** `GeminiAgentModel` now appends the live document catalog (IDs, titles, and exact region names only, never document text) to the classify and resolve requests, and tells both steps that listed regions are in scope. Verified live after the fix: the same question answered with a citation to page 2 of the uploaded PDF. An A/B rerun with the catalog disabled showed that the chart and comparison outcomes below do not depend on it. Regression tests: `backend/tests/test_provider_catalog.py`.
+- **Proposed future fix:** None for this pattern.
+
+### Generated chart code using `if __name__ == "__main__":` refused by code policy — open
+
+- **Input:** "Create a bar chart comparing the literacy rates of Karnataka and Odisha.", run live repeatedly on 2026-09-24.
+- **Observed behavior:** The same request produced a chart on some runs and a refusal on others. Classification, evidence selection, and dataset hydration were identical down to the chunk IDs; the failing runs stopped at `code_policy_validation` with `Dunder name is forbidden: __name__`.
+- **Root cause:** The code generator sometimes wraps its program in the standard `if __name__ == "__main__":` idiom. The executor's AST policy forbids every dunder name (a deliberate defence against `__class__`/`__subclasses__` escapes), and a policy rejection goes straight to refusal instead of through the bounded repair loop.
+- **Safety impact:** None; the policy failed closed. The impact is availability (an intermittently refused chart).
+- **Current mitigation:** None yet. This touches the sandbox policy, so it is left for an explicit decision rather than changed alongside UI work.
+- **Proposed future fix:** Either tell the code-generation prompt not to use the idiom, route policy rejections through the existing single repair attempt with the policy error as feedback, or allow only the exact read-only comparison `__name__ == "__main__"`. The repair route is the most general and keeps the dunder ban intact.
+
+### Three-region chart refused although all three values were found — open
+
+- **Input:** "Create a bar chart comparing the literacy rates of Karnataka, Odisha and Madhya Pradesh.", run live five times on 2026-09-24 (three with the document catalog, two without); refused every time.
+- **Observed behavior:** Retrieval returned candidates for all three regions, but `evidence_assessment` returned `sufficient: false` while its own explanation said "All three requested entities … have direct answers for their literacy rates in 2011".
+- **Root cause (partial):** The assessment model's `sufficient` flag contradicts its explanation. The same pipeline succeeds for two regions, which points at the larger evidence pack for three targets; this has not yet been traced chunk by chunk.
+- **Safety impact:** None; the agent refused. The impact is availability for three-way artifacts.
+- **Current mitigation:** The UI's example prompt uses the reliable two-region chart.
+- **Proposed future fix:** Derive sufficiency deterministically from the per-target `selected_evidence_by_target` map (every required target has a direct-answer item) instead of trusting the model's boolean, and add a regression built from this real evidence pack.
+
 ## Streamlit boundary failures
 
 The first live UI request completed successfully in the backend but remained visually pending. A

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from typing import Literal, Protocol, TypeVar, cast
 
@@ -24,7 +25,10 @@ from backend.app.execution.contracts import (
     GeneratedProgram,
     SourceManifest,
 )
-from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
+
+DocumentCatalog = Callable[[], Awaitable[list[DocumentSummary]]]
+_CATALOG_LIMIT = 50
 
 ModelResult = TypeVar("ModelResult", bound=BaseModel)
 REQUEST_DEADLINE: ContextVar[float | None] = ContextVar("agent_request_deadline", default=None)
@@ -174,11 +178,38 @@ class AgentModel(Protocol):
 
 class GeminiAgentModel:
     def __init__(
-        self, model: BaseChatModel, *, timeout_seconds: float = 60, max_retries: int = 1
+        self,
+        model: BaseChatModel,
+        *,
+        timeout_seconds: float = 60,
+        max_retries: int = 1,
+        catalog: DocumentCatalog | None = None,
     ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
+        self.catalog = catalog
+
+    async def _catalog_note(self) -> str:
+        """Name the supplied documents so scope and region names come from the library itself.
+
+        Without this, the classifier only knew the corpus as "Indian Census reports" and relied
+        on world knowledge to recognise regions, so an uploaded report for an unfamiliar region
+        was treated as an unresolved referent. Identity metadata only; never document text.
+        """
+        if self.catalog is None:
+            return ""
+        try:
+            documents = await self.catalog()
+        except Exception:
+            return ""
+        if not documents:
+            return ""
+        lines = "\n".join(
+            f"- {item.document_id}: {item.title} (region: {item.region})"
+            for item in documents[:_CATALOG_LIMIT]
+        )
+        return f"Supplied documents (use these exact region names and document IDs):\n{lines}\n\n"
 
     async def _structured(self, schema: type[ModelResult], system: str, human: str) -> ModelResult:
         started = time.monotonic()
@@ -237,6 +268,8 @@ class GeminiAgentModel:
             """Classify a request for an assistant limited to supplied Indian Census reports.
 Use one allowed task_type. Consider conversational context. Extract explicit regions/document IDs.
 Use clarification for unresolved referents, and out_of_scope for unrelated subject matter.
+Any region or document in the supplied documents list is in scope, including user-uploaded ones;
+use its exact region name.
 For artifact tasks, populate artifact_requirement with presentation type and the independent source
 data need: metric, year, regions, population scope, residence scope, and comparison flag. A request
 to create a chart requires numeric source data; it does not require a chart in the source PDF.
@@ -245,7 +278,8 @@ value of a metric, rather than naming specific targets, is task_type=artifact_ta
 regions list and artifact_requirement.rank_all=true, plus rank_direction set to max or min. Identify
 the single report being scanned by region or document_id; do not enumerate individual entity names.
 Do not answer the question.""",
-            f"Recent conversation:\n{self._context(context)}\n\nCurrent request:\n{query}",
+            f"{await self._catalog_note()}Recent conversation:\n{self._context(context)}\n\n"
+            f"Current request:\n{query}",
         )
 
     async def resolve(self, query: str, context: list[BaseMessage]) -> ResolvedQuery:
@@ -257,8 +291,10 @@ context only, never source evidence. If a referent is genuinely missing, request
 Do not invent it. Classify the resolved standalone task and extract all regions/document IDs.
 For artifact tasks, preserve the complete typed artifact data requirement, including rank_all and
 rank_direction when the follow-up still asks which unnamed entity has the highest/lowest value.
-Do not set requires_clarification when the rewritten query contains the metric and every target.""",
-            f"Recent conversation:\n{self._context(context)}\n\nCurrent request:\n{query}",
+Do not set requires_clarification when the rewritten query contains the metric and every target.
+Regions named in the supplied documents list are valid targets; use their exact names.""",
+            f"{await self._catalog_note()}Recent conversation:\n{self._context(context)}\n\n"
+            f"Current request:\n{query}",
         )
 
     async def assess_evidence(

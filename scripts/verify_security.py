@@ -26,7 +26,14 @@ def main() -> int:
     frontend = _service_block(compose, "frontend", "executor")
     executor = _service_block(compose, "executor", "qdrant")
     backend = _service_block(compose, "backend", "frontend")
+    web = _service_block(compose, "web", "frontend")
     checks = {
+        "web_non_root": 'user: "1000:1000"' in web,
+        "web_read_only": "read_only: true" in web,
+        "web_capabilities_dropped": "cap_drop:\n      - ALL" in web,
+        "web_no_credentials": "GOOGLE_" not in web and "/var/secrets" not in web,
+        "web_no_mounts": "volumes:" not in web and "docker.sock" not in web,
+        "web_only_frontend_network": "- frontend_api" in web and "backend_data" not in web,
         "frontend_non_root": 'user: "10002:10002"' in frontend,
         "frontend_read_only": "read_only: true" in frontend,
         "frontend_capabilities_dropped": "cap_drop:\n      - ALL" in frontend,

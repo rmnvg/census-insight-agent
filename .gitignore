@@ -43,6 +43,7 @@ evals/reports/
 data/processed/*
 !data/processed/.gitkeep
 data/manifests/generated/
+data/manifests/uploads/
 data/source/pdf/*
 !data/source/pdf/.gitkeep
 data/source/markdown/*

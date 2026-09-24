@@ -12,6 +12,7 @@ class SessionResponse(StrictModel):
     session_id: str
     created_at: datetime
     updated_at: datetime
+    title: str | None = None
 
 
 class ChatRequest(StrictModel):

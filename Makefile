@@ -1,4 +1,4 @@
-.PHONY: sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
+.PHONY: web-install web-check web-dev sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
 
 sync:
 	uv sync --frozen
@@ -73,3 +73,12 @@ prune-checkpoints-dry-run:
 
 prune-checkpoints:
 	uv run --frozen python scripts/prune_checkpoints.py --allow-delete
+
+web-install:
+	cd web && npm ci --no-audit --no-fund
+
+web-check:
+	cd web && npm run check && npm run build
+
+web-dev:
+	cd web && CENSUS_API_BASE_URL=http://127.0.0.1:8000 npm run dev
