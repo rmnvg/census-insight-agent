@@ -42,6 +42,9 @@ services:
       ARTIFACT_EXECUTION_TIMEOUT_SECONDS: ${ARTIFACT_EXECUTION_TIMEOUT_SECONDS:-30}
       ARTIFACT_MAX_FILES: ${ARTIFACT_MAX_FILES:-8}
       ARTIFACT_MAX_TOTAL_BYTES: ${ARTIFACT_MAX_TOTAL_BYTES:-20971520}
+      DOCUMENT_UPLOAD_ENABLED: ${DOCUMENT_UPLOAD_ENABLED:-true}
+      DOCUMENT_UPLOAD_MAX_BYTES: ${DOCUMENT_UPLOAD_MAX_BYTES:-52428800}
+      DOCUMENT_UPLOAD_MAX_PAGES: ${DOCUMENT_UPLOAD_MAX_PAGES:-400}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -64,7 +67,36 @@ services:
       - frontend_api
       - backend_data
 
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    environment:
+      CENSUS_API_BASE_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:3000:3000"
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev,uid=1000,gid=1000
+      - /app/.next/cache:size=64m,noexec,nosuid,nodev,uid=1000,gid=1000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - frontend_api
+
+  # Original Streamlit UI, kept for reference: `docker compose --profile streamlit up`.
   frontend:
+    profiles: ["streamlit"]
     build:
       context: .
       dockerfile: frontend/Dockerfile

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     sparse_embedding_model: str = "Qdrant/bm25"
     ingestion_version: str = "1"
     admin_ingestion_enabled: bool = False
+    document_upload_enabled: bool = True
+    document_upload_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)
+    document_upload_max_pages: int = Field(default=400, ge=1)
     workspace_root: Path = Path("workspace")
     skills_dir: Path = Path("skills")
     agent_max_steps: int = 16

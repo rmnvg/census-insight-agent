@@ -1,10 +1,14 @@
+import asyncio
 import json
+import logging
 import mimetypes
+from collections.abc import AsyncIterator
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
@@ -14,11 +18,15 @@ from backend.app.agent.models import (
     RunTrace,
     SessionContextStatus,
     SessionRecord,
+    SessionSummary,
+    SessionTitleUpdate,
+    SessionTranscript,
 )
 from backend.app.agent.service import AgentChatError, UnknownSessionError, get_agent_service
 from backend.app.config import get_settings
 from backend.app.execution.client import EXECUTOR_HEARTBEAT_HEALTHY_SECONDS
 from backend.app.execution.contracts import ArtifactDescriptor, ArtifactListing, ExecutorHealth
+from backend.app.ingestion.discovery import ensure_within
 from backend.app.ingestion.models import (
     CoverageLimitation,
     DocumentCoverageReport,
@@ -27,7 +35,9 @@ from backend.app.ingestion.models import (
     DocumentPublicSummary,
     IngestionReport,
 )
+from backend.app.ingestion.page_images import page_count, render_page_png
 from backend.app.ingestion.service import IngestionService
+from backend.app.ingestion.uploads import UploadError, UploadJob, UploadService
 from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.models import (
     DocumentSummary,
@@ -38,6 +48,8 @@ from backend.app.retrieval.models import (
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
 from backend.app.retrieval.sparse import BM25SparseEncoder
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -147,6 +159,45 @@ async def get_session_context(session_id: str) -> SessionContextStatus:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/sessions", response_model=list[SessionSummary], tags=["agent"])
+async def list_sessions(
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[SessionSummary]:
+    """Sessions with at least one message, most recently active first."""
+    return await get_agent_service().list_sessions(limit)
+
+
+@router.get("/sessions/{session_id}/messages", response_model=SessionTranscript, tags=["agent"])
+async def get_session_messages(session_id: str) -> SessionTranscript:
+    try:
+        return await get_agent_service().get_transcript(session_id)
+    except UnknownSessionError as error:
+        raise HTTPException(status_code=404, detail="Unknown session") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionRecord, tags=["agent"])
+async def rename_session(session_id: str, update: SessionTitleUpdate) -> SessionRecord:
+    try:
+        return await get_agent_service().rename_session(session_id, update.title)
+    except UnknownSessionError as error:
+        raise HTTPException(status_code=404, detail="Unknown session") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.delete("/sessions/{session_id}", status_code=204, tags=["agent"])
+async def delete_session(session_id: str) -> Response:
+    try:
+        await get_agent_service().delete_session(session_id)
+    except UnknownSessionError as error:
+        raise HTTPException(status_code=404, detail="Unknown session") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return Response(status_code=204)
 
 
 @router.get(
@@ -313,6 +364,116 @@ async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
         )
         status_code = _ERROR_CODE_STATUS.get(error.error.code, _DEFAULT_ERROR_STATUS)
         return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+
+# Human-readable progress labels for LangGraph nodes, shown while a turn is running.
+PROGRESS_LABELS: dict[str, str] = {
+    "load_memory": "Loading validated conversation memory",
+    "classify_task": "Understanding the question",
+    "resolve_query": "Resolving follow-up references",
+    "plan": "Planning retrieval",
+    "load_skill": "Loading task skill",
+    "call_tools": "Searching the Census reports",
+    "assess_evidence": "Assessing evidence relevance",
+    "synthesize": "Drafting a cited answer",
+    "prepare_artifact": "Hydrating verified data for the artifact",
+    "generate_artifact_code": "Writing chart/table code",
+    "execute_artifact": "Running code in the isolated executor",
+    "inspect_artifact": "Inspecting generated artifact",
+    "repair_artifact": "Repairing artifact code",
+    "validate_citations": "Validating every citation against the source",
+    "repair": "Repairing an unsupported claim",
+    "graceful_response": "Preparing a safe response",
+    "persist_result": "Saving validated memory",
+}
+_SSE_KEEPALIVE_SECONDS = 15.0
+# Turns keep running after a client disconnects so their result still lands in the transcript.
+_background_turns: set[asyncio.Task[None]] = set()
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@router.post(
+    "/chat/stream",
+    tags=["agent"],
+    responses={
+        200: {
+            "description": (
+                "Server-sent events: `progress` ({node, label}) while the graph runs, then "
+                "exactly one `result` (the /chat response body) or `error` (AgentErrorResponse)."
+            ),
+            "content": {"text/event-stream": {}},
+        }
+    },
+)
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    service = get_agent_service()
+    try:
+        if await service.get_session(request.session_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown session")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def progress(node: str) -> None:
+        queue.put_nowait(_sse("progress", {"node": node, "label": PROGRESS_LABELS.get(node, node)}))
+
+    async def run_turn() -> None:
+        try:
+            response = await service.chat(request.session_id, request.message, on_progress=progress)
+            queue.put_nowait(_sse("result", response.model_dump(mode="json", by_alias=True)))
+        except AgentChatError as error:
+            payload = AgentErrorResponse(
+                error_code=error.error.code,
+                message=error.error.message,
+                session_id=error.session_id,
+                trace_id=error.run_id,
+                retryable=error.error.retryable,
+            )
+            queue.put_nowait(_sse("error", payload.model_dump()))
+        except ValueError as error:
+            queue.put_nowait(
+                _sse("error", {"error_code": "INVALID_REQUEST", "message": str(error)})
+            )
+        except Exception:
+            logger.exception("Streaming chat turn failed")
+            queue.put_nowait(
+                _sse(
+                    "error",
+                    {
+                        "error_code": "INTERNAL_ERROR",
+                        "message": "The request could not be completed. Please retry.",
+                        "retryable": True,
+                    },
+                )
+            )
+        finally:
+            queue.put_nowait(None)
+
+    task = asyncio.create_task(run_turn())
+    _background_turns.add(task)
+    task.add_done_callback(_background_turns.discard)
+
+    async def events() -> AsyncIterator[str]:
+        yield _sse("started", {"session_id": request.session_id})
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+            except TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                return
+            yield item
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get(
@@ -503,6 +664,9 @@ def document_coverage(document_id: str) -> DocumentCoverageSummary:
     report_path = settings.data_root / "processed" / "dry-run-report.json"
     if not report_path.is_file():
         report_path = settings.data_root / "processed" / "idempotency-report.json"
+    upload_report = UploadService.report_path_for(settings.data_root, document_id)
+    if upload_report is not None:
+        report_path = upload_report
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         record = next(
@@ -523,6 +687,117 @@ def document_coverage(document_id: str) -> DocumentCoverageSummary:
         ),
         coverage=coverage,
         limitations=limitations,
+    )
+
+
+@lru_cache
+def get_upload_service() -> UploadService:
+    settings = get_settings()
+    return UploadService(
+        settings, point_remover=lambda document_id: _store().delete_document(document_id)
+    )
+
+
+def _require_uploads_enabled() -> UploadService:
+    if not get_settings().document_upload_enabled:
+        raise HTTPException(status_code=403, detail="Document upload is disabled")
+    return get_upload_service()
+
+
+@router.post("/documents/upload", response_model=UploadJob, status_code=202, tags=["documents"])
+async def upload_document(
+    background: BackgroundTasks,
+    file: Annotated[UploadFile, File(description="A text-layer PDF")],
+    title: Annotated[str, Form(min_length=1, max_length=200)],
+    region: Annotated[str, Form(min_length=1, max_length=80)],
+) -> UploadJob:
+    """Validate and stage a PDF, then index it in the background (poll the returned job)."""
+    uploads = _require_uploads_enabled()
+    limit = get_settings().document_upload_max_bytes
+    content = await file.read(limit + 1)
+    try:
+        job = await asyncio.to_thread(
+            uploads.stage,
+            filename=file.filename or "document.pdf",
+            content=content,
+            title=title,
+            region=region,
+        )
+    except UploadError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    background.add_task(uploads.process, job.job_id)
+    return job
+
+
+@router.get("/documents/uploads", response_model=list[UploadJob], tags=["documents"])
+def list_uploads() -> list[UploadJob]:
+    return get_upload_service().list_jobs()
+
+
+@router.get("/documents/uploads/{job_id}", response_model=UploadJob, tags=["documents"])
+def get_upload(job_id: str) -> UploadJob:
+    job = get_upload_service().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown upload job")
+    return job
+
+
+@router.delete("/documents/{document_id}", status_code=204, tags=["documents"])
+async def delete_document(document_id: str) -> Response:
+    uploads = _require_uploads_enabled()
+    try:
+        await uploads.delete_document(document_id)
+    except UploadError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    return Response(status_code=204)
+
+
+def _document_pdf(document_id: str) -> Path:
+    settings = get_settings()
+    path = settings.data_root / "manifests" / "generated" / f"{document_id}.json"
+    generated = (settings.data_root / "manifests" / "generated").resolve()
+    try:
+        manifest_path = ensure_within(path, generated)
+        manifest = DocumentManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+        pdf = ensure_within(settings.data_root / manifest.pdf_path, settings.data_root / "source")
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Unknown document") from error
+    if not pdf.is_file():
+        raise HTTPException(status_code=404, detail="Source PDF unavailable")
+    return pdf
+
+
+@router.get(
+    "/documents/{document_id}/pages/{page_number}",
+    tags=["documents"],
+    responses={200: {"content": {"image/png": {}}, "description": "Rendered PDF page"}},
+)
+async def document_page_image(
+    document_id: str,
+    page_number: int,
+    highlight: Annotated[str | None, Query(max_length=2000)] = None,
+) -> Response:
+    """Render a physical PDF page so a citation can be checked against the original.
+
+    `highlight` is the citation snippet; matching text is highlighted when it locates
+    unambiguously. Headers: `X-Page-Count` (document page count) and `X-Highlight`
+    (`matched`, `unmatched`, `no_text_layer`, or `none`).
+    """
+    pdf = _document_pdf(document_id)
+    try:
+        (content, status), pages = await asyncio.to_thread(
+            lambda: (render_page_png(pdf, page_number, highlight), page_count(pdf))
+        )
+    except IndexError as error:
+        raise HTTPException(status_code=404, detail="Page out of range") from error
+    return Response(
+        content,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "X-Page-Count": str(pages),
+            "X-Highlight": status,
+        },
     )
 
 

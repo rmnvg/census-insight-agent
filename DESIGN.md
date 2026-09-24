@@ -34,10 +34,10 @@ bounded result deadline; another day would add queue admission control and stale
 ```mermaid
 flowchart LR
   subgraph Presentation
-    User --> Streamlit
+    User --> Web[Next.js UI + allowlisted proxy]
   end
   subgraph Orchestration
-    Streamlit --> FastAPI
+    Web --> FastAPI
     FastAPI --> LangGraph
     LangGraph --> Gemini[Vertex Gemini / ADC]
     LangGraph --> Skills[Runtime skills]
@@ -61,7 +61,69 @@ flowchart LR
 
 Credentials and source evidence stay behind the backend boundary. The presentation plane cannot access Qdrant or runtime files. The execution plane receives a checksum-bound dataset but no credentials, network, source corpus, checkpoints, or Docker socket.
 
-## Streamlit UI boundary
+## Next.js UI boundary
+
+The default interface is a Next.js (App Router, TypeScript) client in `web/`. The browser never
+talks to FastAPI directly: every call goes to a same-origin route handler
+(`web/src/app/api/[...path]/route.ts`) that forwards only an explicit method-and-path allowlist
+(`web/src/lib/proxy-rules.ts`, unit tested). Administrative ingestion, raw retrieval search, and the
+OpenAPI docs are not reachable through it. The proxy checks the declared body size per route before
+reading a body and forwards bodies buffered, so the backend always receives an exact
+`Content-Length`. The `web` container runs as UID 1000 with a read-only root, all capabilities
+dropped, `no-new-privileges`, resource bounds, only the `frontend_api` network, no volumes, and no
+credentials; `scripts/verify_security.py` asserts each of these.
+
+**Sessions.** The backend stores a display transcript per session (`app_messages` in the checkpoint
+database) so a conversation can be listed, reopened by URL (`/c/<session_id>`), renamed, and
+deleted. The transcript is display-only: nothing reads it back into agent state, follow-up turns
+keep using the validated claim history in the LangGraph checkpoint, and a test deletes the whole
+transcript mid-conversation to prove memory survives. Deleting a session removes its transcript,
+checkpoints, traces, and artifacts under the session lock, so an in-flight turn is never deleted
+underneath itself.
+
+**Streaming progress.** `POST /chat/stream` runs the same graph with LangGraph's `tasks` stream
+mode and emits a server-sent `progress` event as each node starts, then exactly one `result` or
+`error`. Keepalive comments hold idle proxies open. The turn runs in a server task that outlives the
+HTTP connection, so a closed tab still produces a saved answer; the client reloads the transcript
+instead of retrying. This keeps the existing rule that a chat request is never retried
+automatically. It streams progress by node, not tokens: answers are only released after citation
+validation, so partial model text is never shown.
+
+**Rendering.** Answers are not rewritten. When the answer body is exactly the validated claims
+(the normal cited case), the UI renders those claims as the answer, each with its own citation chips
+and, for derived values, the operation computed in code. The plain-text `Sources:` list the backend
+appends for text clients is replaced by structured source cards rather than shown twice. Snippets
+and table cells render as React-escaped text, and Markdown rendering does not enable raw HTML.
+
+**Checking a citation against the PDF.** `GET /documents/{id}/pages/{n}` renders the physical page
+from the authoritative PDF. With a `highlight` snippet it marks text only where a fragment locates
+unambiguously, and reports the result in `X-Highlight`. The bundled Census PDFs draw every glyph as
+vector paths and have no text layer, so for them the viewer states that the quote cannot be located
+automatically rather than implying a match; highlighting works for text-layer uploads.
+
+## Document upload pipeline
+
+`POST /documents/upload` accepts a PDF plus a title and region, then indexes it in the background
+(`backend/app/ingestion/uploads.py`). An upload never takes a shortcut around ingestion:
+
+1. An ASGI guard rejects missing or oversized `Content-Length` before Starlette spools anything.
+2. The file is validated in memory: PDF signature, opens in PyMuPDF, not password protected, page
+   count within limit, not already in the library by SHA-256.
+3. The PDF is written atomically under a derived name (`upload-<slug>-<sha>.pdf`, never the client
+   filename) with an override manifest in the git-ignored `data/manifests/uploads/`.
+4. `IngestionService.ingest` indexes it through the same path as the CLI: PyMuPDF4LLM extraction for
+   a newly supplied PDF, page-bounded checksum-bound chunks, dense and BM25 vectors.
+5. A failed job removes its source file, manifest, and any points it upserted, so no retrievable
+   chunk ever outlives its source PDF. Jobs left running by a restart are marked failed at startup.
+
+Pages without a text layer become `failed_page_mapping` and are excluded, never OCR-guessed. A PDF
+with no extractable text fails with that explanation. Only uploaded documents can be deleted over
+HTTP. The classifier and resolver receive the live document catalog (IDs, titles, and regions only,
+never text), so an uploaded region is in scope under its exact name. Before this, the classifier knew
+the corpus only as "Indian Census reports" and asked for clarification about an uploaded region it
+did not recognise.
+
+## Streamlit UI boundary (optional, `--profile streamlit`)
 
 Streamlit provides a compact evaluator-facing chat and artifact interface while FastAPI remains the
 only application boundary. The frontend calls public HTTP endpoints and contains its own strict

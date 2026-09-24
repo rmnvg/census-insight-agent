@@ -38,5 +38,27 @@ jobs:
         run: docker build -f backend/Dockerfile -t census-backend-ci .
       - name: Build frontend image
         run: docker build -f frontend/Dockerfile -t census-frontend-ci .
+      - name: Build web image
+        run: docker build -f web/Dockerfile -t census-web-ci .
       - name: Build executor image
         run: docker build -f executor/Dockerfile -t census-executor-ci .
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck, lint, and unit tests
+        run: npm run check
+      - name: Production build
+        run: npm run build

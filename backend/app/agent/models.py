@@ -277,6 +277,36 @@ class SessionRecord(BaseModel):
     session_id: str
     created_at: datetime
     updated_at: datetime
+    title: str | None = None
+
+
+class SessionSummary(SessionRecord):
+    message_count: int = Field(default=0, ge=0)
+
+
+class SessionTitleUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class TranscriptEntry(BaseModel):
+    """One displayed chat message.
+
+    The transcript exists only to redraw a conversation in a client. It is never read back into
+    agent state: follow-up turns keep using the structured `validated_claim_history`, so assistant
+    prose stored here can never become evidence.
+    """
+
+    message_id: str
+    role: Literal["user", "assistant"]
+    created_at: datetime
+    content: str | None = None
+    response: AgentResponse | None = None
+    error: AgentErrorResponse | None = None
+
+
+class SessionTranscript(BaseModel):
+    session: SessionRecord
+    messages: list[TranscriptEntry] = Field(default_factory=list)
 
 
 class SessionContextStatus(BaseModel):

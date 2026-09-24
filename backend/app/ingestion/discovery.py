@@ -40,7 +40,13 @@ def _load_overrides(manifest_dir: Path, source_root: Path) -> list[ManifestOverr
     if not manifest_dir.exists():
         return []
     overrides: list[ManifestOverride] = []
-    for path in sorted(manifest_dir.glob("*.override.json")):
+    # Documents uploaded through the API keep their overrides in a separate, git-ignored folder
+    # so the curated corpus manifest stays untouched.
+    paths = [
+        *sorted(manifest_dir.glob("*.override.json")),
+        *sorted((manifest_dir / "uploads").glob("*.override.json")),
+    ]
+    for path in paths:
         ensure_within(path, manifest_dir)
         raw = json.loads(path.read_text(encoding="utf-8"))
         items = raw if isinstance(raw, list) else [raw]

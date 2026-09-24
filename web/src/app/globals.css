@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --scrollbar: rgb(0 0 0 / 0.15);
+}
+
+.dark {
+  color-scheme: dark;
+  --scrollbar: rgb(255 255 255 / 0.15);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-white text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+/* Answer Markdown: compact, readable prose without the typography plugin. */
+.answer-prose {
+  @apply text-[15px] leading-7 text-zinc-800 dark:text-zinc-200;
+}
+.answer-prose > * + * {
+  @apply mt-3;
+}
+.answer-prose strong {
+  @apply font-semibold text-zinc-900 dark:text-white;
+}
+.answer-prose ul {
+  @apply list-disc space-y-1 pl-5;
+}
+.answer-prose ol {
+  @apply list-decimal space-y-1 pl-5;
+}
+.answer-prose a {
+  @apply text-teal-700 underline underline-offset-2 dark:text-teal-400;
+}
+.answer-prose code {
+  @apply rounded bg-zinc-100 px-1 py-0.5 font-mono text-[13px] dark:bg-zinc-800;
+}
+.answer-prose h1,
+.answer-prose h2,
+.answer-prose h3 {
+  @apply font-semibold text-zinc-900 dark:text-white;
+}
+.answer-prose table {
+  @apply block max-w-full overflow-x-auto text-sm;
+}
+.answer-prose th,
+.answer-prose td {
+  @apply border border-zinc-200 px-2 py-1 dark:border-zinc-800;
+}
+
+@keyframes step-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-step-in {
+  animation: step-in 220ms ease-out both;
+}

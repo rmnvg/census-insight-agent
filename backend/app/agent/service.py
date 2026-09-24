@@ -1,5 +1,8 @@
 import asyncio
+import logging
+import shutil
 import time
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from typing import Any, cast
 from uuid import uuid4
@@ -17,11 +20,14 @@ from backend.app.agent.checkpoint import (
 from backend.app.agent.errors import AgentOperationalError
 from backend.app.agent.graph import AgentGraph
 from backend.app.agent.models import (
+    AgentErrorResponse,
     AgentResponse,
     AgentState,
     RunTrace,
     SessionContextStatus,
     SessionRecord,
+    SessionSummary,
+    SessionTranscript,
 )
 from backend.app.agent.persistence import (
     SessionStore,
@@ -44,6 +50,10 @@ from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
 from backend.app.retrieval.sparse import BM25SparseEncoder
+
+logger = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 
 class UnknownSessionError(ValueError):
@@ -116,6 +126,7 @@ class AgentService:
             get_chat_model(resolved),
             timeout_seconds=resolved.agent_provider_timeout_seconds,
             max_retries=resolved.agent_provider_max_retries,
+            catalog=tools.list_documents,
         )
         return cls(resolved, model, tools)
 
@@ -129,6 +140,46 @@ class AgentService:
     async def get_session(self, session_id: str) -> SessionRecord | None:
         await self.initialize()
         return await self.sessions.get(session_id)
+
+    async def list_sessions(self, limit: int = 100) -> list[SessionSummary]:
+        await self.initialize()
+        return await self.sessions.list_recent(limit)
+
+    async def get_transcript(self, session_id: str) -> SessionTranscript:
+        await self.initialize()
+        session = await self.sessions.get(session_id)
+        if session is None:
+            raise UnknownSessionError("Unknown session")
+        return SessionTranscript(session=session, messages=await self.sessions.messages(session_id))
+
+    async def rename_session(self, session_id: str, title: str) -> SessionRecord:
+        await self.initialize()
+        if await self.sessions.get(session_id) is None:
+            raise UnknownSessionError("Unknown session")
+        await self.sessions.set_title(session_id, title)
+        session = await self.sessions.get(session_id)
+        assert session is not None
+        return session
+
+    async def delete_session(self, session_id: str) -> None:
+        """Remove a session's transcript, checkpoints, traces, and artifacts.
+
+        Waits for any in-flight turn on the same session so a running graph never loses its
+        checkpoint underneath it.
+        """
+        validate_session_id(session_id)
+        await self.initialize()
+        if await self.sessions.get(session_id) is None:
+            raise UnknownSessionError("Unknown session")
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
+                await saver.adelete_thread(session_id)
+            await self.sessions.delete(session_id)
+            sessions_root = (self.settings.workspace_root / "sessions").resolve()
+            session_dir = (sessions_root / session_id).resolve()
+            if session_dir.parent == sessions_root and session_dir.is_dir():
+                await asyncio.to_thread(shutil.rmtree, session_dir)
 
     async def get_context_status(self, session_id: str) -> SessionContextStatus:
         validate_session_id(session_id)
@@ -149,15 +200,73 @@ class AgentService:
             has_validated_comparison=any(turn.task_type == "comparison" for turn in history),
         )
 
-    async def chat(self, session_id: str, message: str) -> AgentResponse:
+    async def chat(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> AgentResponse:
         validate_session_id(session_id)
         # Compose runs one API process. Hold the lock through checkpoint and trace persistence;
         # weak references release idle session locks without an ever-growing session registry.
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            return await self._chat_turn(session_id, message)
+            if not message.strip():
+                raise ValueError("Message must be non-empty")
+            await self.initialize()
+            if await self.sessions.get(session_id) is None:
+                raise UnknownSessionError("Unknown session")
+            await self.sessions.append_user_message(session_id, message.strip())
+            try:
+                response = await self._chat_turn(session_id, message, on_progress)
+            except AgentChatError as chat_error:
+                await self._record_assistant(
+                    session_id,
+                    error=AgentErrorResponse(
+                        error_code=chat_error.error.code,
+                        message=chat_error.error.message,
+                        session_id=session_id,
+                        trace_id=chat_error.run_id,
+                        retryable=chat_error.error.retryable,
+                    ),
+                )
+                raise
+            except Exception:
+                await self._record_assistant(
+                    session_id,
+                    error=AgentErrorResponse(
+                        error_code="INTERNAL_ERROR",
+                        message="The request could not be completed. Please retry.",
+                        session_id=session_id,
+                        trace_id="",
+                        retryable=True,
+                    ),
+                )
+                raise
+            await self._record_assistant(session_id, response=response)
+            return response
 
-    async def _chat_turn(self, session_id: str, message: str) -> AgentResponse:
+    async def _record_assistant(
+        self,
+        session_id: str,
+        *,
+        response: AgentResponse | None = None,
+        error: AgentErrorResponse | None = None,
+    ) -> None:
+        # The answer (or error) has already been produced and checkpointed; a failure to store
+        # its display copy must not turn a finished turn into an error for the caller.
+        try:
+            await self.sessions.append_assistant_message(session_id, response=response, error=error)
+        except Exception:
+            logger.exception("Could not record assistant transcript entry")
+
+    async def _chat_turn(
+        self,
+        session_id: str,
+        message: str,
+        on_progress: ProgressCallback | None = None,
+    ) -> AgentResponse:
         validate_session_id(session_id)
         if not message.strip():
             raise ValueError("Message must be non-empty")
@@ -225,7 +334,7 @@ class AgentService:
             )
             try:
                 async with asyncio.timeout(self.settings.agent_request_timeout_seconds):
-                    result = await cast(Any, graph).ainvoke(initial, config=config)
+                    result = await self._run_graph(graph, initial, config, on_progress)
             except AgentOperationalError as operational_error:
                 await self._persist_failed_trace(saver, session_id, run_id, operational_error)
                 raise AgentChatError(operational_error, session_id, run_id) from operational_error
@@ -246,7 +355,7 @@ class AgentService:
             successful = await self._checkpoint_for_run(saver, session_id, run_id)
             if successful is not None:
                 await self.sessions.set_checkpoint_id(session_id, successful)
-        state = hydrate_agent_state(cast(dict[str, Any], result))
+        state = hydrate_agent_state(result)
         response = state.get("final_response")
         if response is None:
             raise RuntimeError("Agent graph completed without a response")
@@ -271,6 +380,32 @@ class AgentService:
         await self.sessions.touch(session_id)
         self.traces.write(trace)
         return response
+
+    @staticmethod
+    async def _run_graph(
+        graph: Any,
+        initial: AgentState,
+        config: dict[str, Any],
+        on_progress: ProgressCallback | None,
+    ) -> dict[str, Any]:
+        """Equivalent to `ainvoke` (its result is the final `values` chunk), additionally
+        reporting each node as it starts so clients can show live progress."""
+        if on_progress is None:
+            return cast(dict[str, Any], await graph.ainvoke(initial, config=config))
+        result: dict[str, Any] | None = None
+        async for mode, chunk in graph.astream(
+            initial, config=config, stream_mode=["tasks", "values"]
+        ):
+            if mode == "values":
+                result = chunk
+            elif mode == "tasks" and "result" not in chunk and isinstance(chunk.get("name"), str):
+                try:
+                    await on_progress(chunk["name"])
+                except Exception:
+                    logger.exception("Progress callback failed")
+        if result is None:
+            raise RuntimeError("Agent graph produced no state")
+        return result
 
     async def _latest_successful_checkpoint(self, saver: Any, session_id: str) -> str | None:
         agen = saver.alist({"configurable": {"thread_id": session_id}})

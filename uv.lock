@@ -133,6 +133,7 @@ backend = [
     { name = "langgraph-checkpoint-sqlite" },
     { name = "pydantic-settings" },
     { name = "pymupdf4llm" },
+    { name = "python-multipart" },
     { name = "qdrant-client", extra = ["fastembed"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -179,6 +180,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.5" },
     { name = "pydantic-settings", marker = "extra == 'backend'", specifier = "==2.15.0" },
     { name = "pymupdf4llm", marker = "extra == 'backend'", specifier = "==1.28.2" },
+    { name = "python-multipart", marker = "extra == 'backend'", specifier = "==0.0.32" },
     { name = "qdrant-client", extras = ["fastembed"], marker = "extra == 'backend'", specifier = "==1.16.2" },
     { name = "seaborn", marker = "extra == 'executor'", specifier = "==0.13.2" },
     { name = "streamlit", marker = "extra == 'frontend'", specifier = "==1.63.0" },

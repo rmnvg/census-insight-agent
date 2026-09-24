@@ -7,14 +7,19 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from backend.app.agent.models import (
+    AgentErrorResponse,
+    AgentResponse,
     ClaimDerivation,
     RunTrace,
     SessionRecord,
+    SessionSummary,
+    TranscriptEntry,
     ValidatedClaimRecord,
     ValidatedClaimTurn,
 )
 
 SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
+_TITLE_MAX_CHARACTERS = 60
 
 
 class SessionStore:
@@ -37,6 +42,17 @@ class SessionStore:
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(app_sessions)")}
             if "checkpoint_id" not in columns:
                 connection.execute("ALTER TABLE app_sessions ADD COLUMN checkpoint_id TEXT")
+            if "title" not in columns:
+                connection.execute("ALTER TABLE app_sessions ADD COLUMN title TEXT")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS app_messages "
+                "(message_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, "
+                "payload TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS app_messages_session "
+                "ON app_messages (session_id, created_at)"
+            )
 
     async def create(self) -> SessionRecord:
         now = datetime.now(UTC)
@@ -62,15 +78,145 @@ class SessionStore:
             session_id=row[0],
             created_at=datetime.fromisoformat(row[1]),
             updated_at=datetime.fromisoformat(row[2]),
+            title=row[3],
         )
 
-    def _get_sync(self, session_id: str) -> tuple[str, str, str] | None:
+    def _get_sync(self, session_id: str) -> tuple[str, str, str, str | None] | None:
         with sqlite3.connect(self.database) as connection:
             row = connection.execute(
-                "SELECT session_id, created_at, updated_at FROM app_sessions WHERE session_id = ?",
+                "SELECT session_id, created_at, updated_at, title FROM app_sessions "
+                "WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
-        return row if row is None else (str(row[0]), str(row[1]), str(row[2]))
+        if row is None:
+            return None
+        return (str(row[0]), str(row[1]), str(row[2]), None if row[3] is None else str(row[3]))
+
+    async def list_recent(self, limit: int = 100) -> list[SessionSummary]:
+        """Most recently active sessions first; sessions that never received a message are
+        omitted so an abandoned "New chat" does not clutter the history."""
+        rows = await asyncio.to_thread(self._list_sync, limit)
+        return [
+            SessionSummary(
+                session_id=session_id,
+                created_at=datetime.fromisoformat(created_at),
+                updated_at=datetime.fromisoformat(updated_at),
+                title=title,
+                message_count=count,
+            )
+            for session_id, created_at, updated_at, title, count in rows
+        ]
+
+    def _list_sync(self, limit: int) -> list[tuple[str, str, str, str | None, int]]:
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT s.session_id, s.created_at, s.updated_at, s.title, COUNT(m.message_id) "
+                "FROM app_sessions s JOIN app_messages m ON m.session_id = s.session_id "
+                "GROUP BY s.session_id ORDER BY s.updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            (
+                str(row[0]),
+                str(row[1]),
+                str(row[2]),
+                None if row[3] is None else str(row[3]),
+                int(row[4]),
+            )
+            for row in rows
+        ]
+
+    async def set_title(self, session_id: str, title: str) -> None:
+        validate_session_id(session_id)
+        await asyncio.to_thread(self._set_title_sync, session_id, _clean_title(title))
+
+    def _set_title_sync(self, session_id: str, title: str) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE app_sessions SET title = ? WHERE session_id = ?", (title, session_id)
+            )
+
+    async def append_user_message(self, session_id: str, content: str) -> TranscriptEntry:
+        entry = TranscriptEntry(
+            message_id=uuid4().hex,
+            role="user",
+            created_at=datetime.now(UTC),
+            content=content,
+        )
+        await asyncio.to_thread(self._append_sync, session_id, entry, _default_title(content))
+        return entry
+
+    async def append_assistant_message(
+        self,
+        session_id: str,
+        *,
+        response: AgentResponse | None = None,
+        error: AgentErrorResponse | None = None,
+    ) -> TranscriptEntry:
+        if (response is None) == (error is None):
+            raise ValueError("An assistant message needs exactly one of response or error")
+        entry = TranscriptEntry(
+            message_id=uuid4().hex,
+            role="assistant",
+            created_at=datetime.now(UTC),
+            response=response,
+            error=error,
+        )
+        await asyncio.to_thread(self._append_sync, session_id, entry, None)
+        return entry
+
+    def _append_sync(
+        self, session_id: str, entry: TranscriptEntry, default_title: str | None
+    ) -> None:
+        validate_session_id(session_id)
+        # Stored by field name (not the `answer` wire alias) so it validates back unchanged.
+        payload = entry.model_dump_json(exclude={"message_id", "created_at"})
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO app_messages (message_id, session_id, role, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    entry.message_id,
+                    session_id,
+                    entry.role,
+                    payload,
+                    entry.created_at.isoformat(),
+                ),
+            )
+            connection.execute(
+                "UPDATE app_sessions SET updated_at = ?, title = COALESCE(title, ?) "
+                "WHERE session_id = ?",
+                (entry.created_at.isoformat(), default_title, session_id),
+            )
+
+    async def messages(self, session_id: str) -> list[TranscriptEntry]:
+        validate_session_id(session_id)
+        rows = await asyncio.to_thread(self._messages_sync, session_id)
+        entries: list[TranscriptEntry] = []
+        for message_id, payload, created_at in rows:
+            raw = json.loads(payload)
+            raw.update(message_id=message_id, created_at=created_at)
+            entries.append(TranscriptEntry.model_validate(raw))
+        return entries
+
+    def _messages_sync(self, session_id: str) -> list[tuple[str, str, str]]:
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT message_id, payload, created_at FROM app_messages "
+                "WHERE session_id = ? ORDER BY created_at, rowid",
+                (session_id,),
+            ).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2])) for row in rows]
+
+    async def delete(self, session_id: str) -> None:
+        validate_session_id(session_id)
+        async with self._lock:
+            await asyncio.to_thread(self._delete_sync, session_id)
+
+    def _delete_sync(self, session_id: str) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("DELETE FROM app_messages WHERE session_id = ?", (session_id,))
+            connection.execute("DELETE FROM app_sessions WHERE session_id = ?", (session_id,))
 
     async def touch(self, session_id: str) -> None:
         now = datetime.now(UTC).isoformat()
@@ -195,6 +341,22 @@ class TraceStore:
                     )
                 )
         return [turn for _, turn in sorted(recovered, key=lambda item: item[0])][-8:]
+
+
+def _clean_title(value: str) -> str:
+    title = " ".join(value.split())
+    if not title:
+        raise ValueError("Session title must be non-empty")
+    return title[:120]
+
+
+def _default_title(message: str) -> str:
+    """Derive a sidebar title from the first question, cut at a word boundary."""
+    text = " ".join(message.split())
+    if len(text) <= _TITLE_MAX_CHARACTERS:
+        return text
+    cut = text[:_TITLE_MAX_CHARACTERS].rsplit(" ", 1)[0] or text[:_TITLE_MAX_CHARACTERS]
+    return cut.rstrip(" ,.;:") + "…"
 
 
 def validate_session_id(value: str) -> str:
