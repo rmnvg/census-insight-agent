@@ -288,6 +288,40 @@ class SessionTitleUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class ResearchSectionPlan(BaseModel):
+    heading: str = Field(min_length=1, max_length=80)
+    question: str = Field(min_length=1, max_length=300)
+
+
+class ResearchPlan(BaseModel):
+    """Planner output: navigation labels and questions only, never factual claims."""
+
+    in_scope: bool = True
+    title: str = Field(default="Research brief", min_length=1, max_length=120)
+    reason: str | None = None
+    sections: list[ResearchSectionPlan] = Field(default_factory=list, max_length=8)
+
+
+class ResearchSection(BaseModel):
+    heading: str
+    question: str
+    status: Literal["answered", "declined", "failed"]
+    session_id: str
+    response: AgentResponse | None = None
+    error: AgentErrorResponse | None = None
+
+
+class ResearchReport(BaseModel):
+    topic: str
+    title: str
+    in_scope: bool = True
+    reason: str | None = None
+    sections: list[ResearchSection] = Field(default_factory=list)
+    verified_claim_count: int = 0
+    citation_count: int = 0
+    duration_seconds: float = 0
+
+
 class TranscriptEntry(BaseModel):
     """One displayed chat message.
 
@@ -300,8 +334,10 @@ class TranscriptEntry(BaseModel):
     role: Literal["user", "assistant"]
     created_at: datetime
     content: str | None = None
+    mode: Literal["chat", "research"] = "chat"
     response: AgentResponse | None = None
     error: AgentErrorResponse | None = None
+    report: ResearchReport | None = None
 
 
 class SessionTranscript(BaseModel):

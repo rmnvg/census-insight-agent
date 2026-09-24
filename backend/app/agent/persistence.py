@@ -4,12 +4,14 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from backend.app.agent.models import (
     AgentErrorResponse,
     AgentResponse,
     ClaimDerivation,
+    ResearchReport,
     RunTrace,
     SessionRecord,
     SessionSummary,
@@ -44,6 +46,9 @@ class SessionStore:
                 connection.execute("ALTER TABLE app_sessions ADD COLUMN checkpoint_id TEXT")
             if "title" not in columns:
                 connection.execute("ALTER TABLE app_sessions ADD COLUMN title TEXT")
+            if "parent_session_id" not in columns:
+                # Research sections run in hidden child sessions owned by the visible chat.
+                connection.execute("ALTER TABLE app_sessions ADD COLUMN parent_session_id TEXT")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS app_messages "
                 "(message_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, "
@@ -54,20 +59,39 @@ class SessionStore:
                 "ON app_messages (session_id, created_at)"
             )
 
-    async def create(self) -> SessionRecord:
+    async def create(self, parent_session_id: str | None = None) -> SessionRecord:
+        if parent_session_id is not None:
+            validate_session_id(parent_session_id)
         now = datetime.now(UTC)
         record = SessionRecord(session_id=uuid4().hex, created_at=now, updated_at=now)
         async with self._lock:
-            await asyncio.to_thread(self._insert_sync, record)
+            await asyncio.to_thread(self._insert_sync, record, parent_session_id)
         return record
 
-    def _insert_sync(self, record: SessionRecord) -> None:
+    def _insert_sync(self, record: SessionRecord, parent_session_id: str | None) -> None:
         with sqlite3.connect(self.database) as connection:
             connection.execute(
                 "INSERT INTO app_sessions "
-                "(session_id, created_at, updated_at, checkpoint_id) VALUES (?, ?, ?, NULL)",
-                (record.session_id, record.created_at.isoformat(), record.updated_at.isoformat()),
+                "(session_id, created_at, updated_at, checkpoint_id, parent_session_id) "
+                "VALUES (?, ?, ?, NULL, ?)",
+                (
+                    record.session_id,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                    parent_session_id,
+                ),
             )
+
+    async def children(self, session_id: str) -> list[str]:
+        validate_session_id(session_id)
+        return await asyncio.to_thread(self._children_sync, session_id)
+
+    def _children_sync(self, session_id: str) -> list[str]:
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT session_id FROM app_sessions WHERE parent_session_id = ?", (session_id,)
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     async def get(self, session_id: str) -> SessionRecord | None:
         validate_session_id(session_id)
@@ -112,6 +136,7 @@ class SessionStore:
             rows = connection.execute(
                 "SELECT s.session_id, s.created_at, s.updated_at, s.title, COUNT(m.message_id) "
                 "FROM app_sessions s JOIN app_messages m ON m.session_id = s.session_id "
+                "WHERE s.parent_session_id IS NULL "
                 "GROUP BY s.session_id ORDER BY s.updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -136,12 +161,15 @@ class SessionStore:
                 "UPDATE app_sessions SET title = ? WHERE session_id = ?", (title, session_id)
             )
 
-    async def append_user_message(self, session_id: str, content: str) -> TranscriptEntry:
+    async def append_user_message(
+        self, session_id: str, content: str, *, mode: Literal["chat", "research"] = "chat"
+    ) -> TranscriptEntry:
         entry = TranscriptEntry(
             message_id=uuid4().hex,
             role="user",
             created_at=datetime.now(UTC),
             content=content,
+            mode=mode,
         )
         await asyncio.to_thread(self._append_sync, session_id, entry, _default_title(content))
         return entry
@@ -152,15 +180,17 @@ class SessionStore:
         *,
         response: AgentResponse | None = None,
         error: AgentErrorResponse | None = None,
+        report: ResearchReport | None = None,
     ) -> TranscriptEntry:
-        if (response is None) == (error is None):
-            raise ValueError("An assistant message needs exactly one of response or error")
+        if sum(value is not None for value in (response, error, report)) != 1:
+            raise ValueError("An assistant message needs exactly one of response, error, report")
         entry = TranscriptEntry(
             message_id=uuid4().hex,
             role="assistant",
             created_at=datetime.now(UTC),
             response=response,
             error=error,
+            report=report,
         )
         await asyncio.to_thread(self._append_sync, session_id, entry, None)
         return entry

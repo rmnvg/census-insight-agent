@@ -4,12 +4,13 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.errors import GraphRecursionError
 from qdrant_client import QdrantClient
 
 from backend.app.agent.checkpoint import (
@@ -23,6 +24,9 @@ from backend.app.agent.models import (
     AgentErrorResponse,
     AgentResponse,
     AgentState,
+    ResearchPlan,
+    ResearchReport,
+    ResearchSection,
     RunTrace,
     SessionContextStatus,
     SessionRecord,
@@ -54,6 +58,14 @@ from backend.app.retrieval.sparse import BM25SparseEncoder
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], Awaitable[None]]
+ResearchEmitter = Callable[[str, dict[str, object]], Awaitable[None]]
+
+MAX_RESEARCH_SECTIONS = 5
+RESEARCH_SECTION_CONCURRENCY = 3
+
+
+class ResearchPlanner(Protocol):
+    async def plan_research(self, topic: str) -> ResearchPlan: ...
 
 
 class UnknownSessionError(ValueError):
@@ -76,6 +88,7 @@ class AgentService:
         tools: AgentTools,
     ) -> None:
         self.settings = settings
+        self.model = model
         self._session_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self.sessions = SessionStore(settings.workspace_root)
         self.traces = TraceStore(settings.workspace_root)
@@ -173,13 +186,180 @@ class AgentService:
             raise UnknownSessionError("Unknown session")
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
-                await saver.adelete_thread(session_id)
-            await self.sessions.delete(session_id)
-            sessions_root = (self.settings.workspace_root / "sessions").resolve()
-            session_dir = (sessions_root / session_id).resolve()
-            if session_dir.parent == sessions_root and session_dir.is_dir():
-                await asyncio.to_thread(shutil.rmtree, session_dir)
+            # Research sections live in hidden child sessions; they go with their chat.
+            for owned in [*await self.sessions.children(session_id), session_id]:
+                async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
+                    await saver.adelete_thread(owned)
+                await self.sessions.delete(owned)
+                sessions_root = (self.settings.workspace_root / "sessions").resolve()
+                session_dir = (sessions_root / owned).resolve()
+                if session_dir.parent == sessions_root and session_dir.is_dir():
+                    await asyncio.to_thread(shutil.rmtree, session_dir)
+
+    async def research(
+        self,
+        session_id: str,
+        topic: str,
+        *,
+        emit: ResearchEmitter,
+        planner: ResearchPlanner | None = None,
+    ) -> ResearchReport:
+        """Plan a brief, answer each section with a full validated agent turn, and save it.
+
+        Each section runs in its own hidden child session so sections cannot contaminate each
+        other's validated memory, and every factual sentence in the brief is a claim that
+        passed the same citation validation as an ordinary chat answer.
+        """
+        validate_session_id(session_id)
+        topic = " ".join(topic.split())
+        if not topic:
+            raise ValueError("Research topic must be non-empty")
+        if planner is None and hasattr(self.model, "plan_research"):
+            planner = cast(ResearchPlanner, self.model)
+        if planner is None:
+            raise ValueError("Research planning is unavailable")
+        resolved_planner = planner
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            await self.initialize()
+            if await self.sessions.get(session_id) is None:
+                raise UnknownSessionError("Unknown session")
+            await self.sessions.append_user_message(session_id, topic, mode="research")
+            started = time.monotonic()
+            try:
+                plan = await resolved_planner.plan_research(topic)
+            except Exception as error:
+                logger.exception("Research planning failed")
+                failure = AgentErrorResponse(
+                    error_code="RESEARCH_PLANNING_FAILED",
+                    message="The research plan could not be created. Please retry.",
+                    session_id=session_id,
+                    trace_id="",
+                    retryable=True,
+                )
+                await self._record_assistant(session_id, error=failure)
+                raise AgentChatError(
+                    AgentOperationalError(
+                        code=failure.error_code,
+                        node="plan_research",
+                        message=failure.message,
+                        retryable=True,
+                        elapsed_seconds=time.monotonic() - started,
+                        configured_timeout_seconds=self.settings.agent_provider_timeout_seconds,
+                        retry_count=0,
+                    ),
+                    session_id,
+                    "",
+                ) from error
+            sections = _normalized_sections(plan)
+            await emit(
+                "plan",
+                {
+                    "title": plan.title,
+                    "in_scope": plan.in_scope and bool(sections),
+                    "reason": plan.reason,
+                    "sections": [section.model_dump() for section in sections],
+                },
+            )
+            gate = asyncio.Semaphore(RESEARCH_SECTION_CONCURRENCY)
+
+            async def run_section(index: int) -> ResearchSection:
+                plan_section = sections[index]
+                async with gate:
+                    child = await self.sessions.create(parent_session_id=session_id)
+                    await emit("section_started", {"index": index})
+
+                    async def progress(node: str) -> None:
+                        await emit("progress", {"index": index, "node": node})
+
+                    try:
+                        response = await self._isolated_turn(
+                            child.session_id, plan_section.question, progress
+                        )
+                        section = ResearchSection(
+                            heading=plan_section.heading,
+                            question=plan_section.question,
+                            status="declined" if response.refusal else "answered",
+                            session_id=child.session_id,
+                            response=response,
+                        )
+                    except Exception as unexpected:
+                        # One section must never sink the whole brief.
+                        if isinstance(unexpected, AgentChatError):
+                            error = unexpected
+                        else:
+                            logger.exception("Research section failed unexpectedly")
+                            error = AgentChatError(
+                                AgentOperationalError(
+                                    code="INTERNAL_ERROR",
+                                    node="research_section",
+                                    message="This section could not be completed.",
+                                    retryable=True,
+                                    elapsed_seconds=None,
+                                    configured_timeout_seconds=None,
+                                    retry_count=0,
+                                ),
+                                child.session_id,
+                                "",
+                            )
+                        section = ResearchSection(
+                            heading=plan_section.heading,
+                            question=plan_section.question,
+                            status="failed",
+                            session_id=child.session_id,
+                            error=AgentErrorResponse(
+                                error_code=error.error.code,
+                                message=error.error.message,
+                                session_id=child.session_id,
+                                trace_id=error.run_id,
+                                retryable=error.error.retryable,
+                            ),
+                        )
+                    await emit(
+                        "section_done",
+                        {"index": index, "section": section.model_dump(mode="json", by_alias=True)},
+                    )
+                    return section
+
+            results = (
+                await asyncio.gather(*(run_section(index) for index in range(len(sections))))
+                if sections
+                else []
+            )
+            answered = [
+                item.response for item in results if item.status == "answered" and item.response
+            ]
+            report = ResearchReport(
+                topic=topic,
+                title=plan.title,
+                in_scope=plan.in_scope and bool(sections),
+                reason=plan.reason
+                or (
+                    None if sections else "No answerable questions could be planned for this topic."
+                ),
+                sections=list(results),
+                verified_claim_count=sum(len(response.claims) for response in answered),
+                citation_count=len(
+                    {
+                        (citation.document_id, citation.page_number, citation.chunk_id)
+                        for response in answered
+                        for citation in response.citations
+                    }
+                ),
+                duration_seconds=round(time.monotonic() - started, 1),
+            )
+            try:
+                await self.sessions.append_assistant_message(session_id, report=report)
+            except Exception:
+                logger.exception("Could not record research report")
+            return report
+
+    async def _isolated_turn(
+        self, session_id: str, message: str, on_progress: ProgressCallback
+    ) -> AgentResponse:
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return await self._chat_turn(session_id, message, on_progress)
 
     async def get_context_status(self, session_id: str) -> SessionContextStatus:
         validate_session_id(session_id)
@@ -338,6 +518,19 @@ class AgentService:
             except AgentOperationalError as operational_error:
                 await self._persist_failed_trace(saver, session_id, run_id, operational_error)
                 raise AgentChatError(operational_error, session_id, run_id) from operational_error
+            except GraphRecursionError as cause:
+                step_error = AgentOperationalError(
+                    code="AGENT_STEP_LIMIT",
+                    node="agent_request",
+                    message="The request needed more reasoning steps than allowed. Please retry.",
+                    retryable=True,
+                    elapsed_seconds=time.monotonic() - request_started,
+                    configured_timeout_seconds=self.settings.agent_request_timeout_seconds,
+                    retry_count=0,
+                    diagnostics={"max_steps": self.settings.agent_max_steps},
+                )
+                await self._persist_failed_trace(saver, session_id, run_id, step_error)
+                raise AgentChatError(step_error, session_id, run_id) from cause
             except TimeoutError as cause:
                 request_error = AgentOperationalError(
                     code="AGENT_REQUEST_TIMEOUT",
@@ -496,6 +689,19 @@ class AgentService:
 
     def get_trace(self, run_id: str) -> RunTrace | None:
         return self.traces.read(run_id)
+
+
+def _normalized_sections(plan: ResearchPlan) -> list[Any]:
+    if not plan.in_scope:
+        return []
+    seen: set[str] = set()
+    sections = []
+    for section in plan.sections:
+        key = " ".join(section.question.casefold().split())
+        if key and key not in seen:
+            seen.add(key)
+            sections.append(section)
+    return sections[:MAX_RESEARCH_SECTIONS]
 
 
 @lru_cache

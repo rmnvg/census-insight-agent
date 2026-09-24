@@ -151,10 +151,15 @@ def add_deterministic_derived_claims(
         left, right = inputs
         formatted = f"{abs(calculation.result):.10f}".rstrip("0").rstrip(".")
         relation = "higher" if calculation.result >= 0 else "lower"
-        unit_text = "percentage points" if calculation.unit == "percentage_points" else "percent"
+        # A count difference (e.g. a sex-ratio gap in females per 1,000 males) has no percent
+        # unit; labelling it "percent" asserted a false relative change.
+        unit_text = {
+            "percentage_points": " percentage points",
+            "percent": " percent",
+        }.get(calculation.unit, "")
         text = (
             f"{left.region or 'The first value'} is {relation} than "
-            f"{right.region or 'the second value'} by {formatted} {unit_text}."
+            f"{right.region or 'the second value'} by {formatted}{unit_text}."
         )
         evidence_ids = list(
             dict.fromkeys(value for claim in inputs for value in claim.evidence_ids)

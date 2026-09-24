@@ -86,3 +86,26 @@ def test_prompt4_claim_enrichment_uses_the_same_scope_semantics() -> None:
     result = enrich_source_claims(draft, [trusted], "Compare the 2011 total persons literacy rates")
     assert result.claims[0].population_scope == "persons"
     assert result.claims[0].residence_scope == "total"
+
+
+def test_total_population_scope_means_unspecified_not_a_category() -> None:
+    # Live 2026-09-24: the classifier began emitting population_scope="Total" for a ranking;
+    # hydration then refused every district row. "Total" is the residence dimension.
+    from backend.app.agent.models import ArtifactDataRequirement
+    from backend.app.agent.scopes import canonicalize_artifact_requirement
+
+    requirement = ArtifactDataRequirement(
+        artifact_type="table",
+        metric="Sex Ratio",
+        year=2011,
+        population_scope="Total",
+        residence_scope="Total",
+        rank_all=True,
+        rank_direction="max",
+    )
+    result = canonicalize_artifact_requirement(
+        requirement, "Which district of Madhya Pradesh had the highest sex ratio?"
+    )
+    assert result.population_scope is None
+    assert canonical_scopes("female literacy", "Total", None)[0] == "female"
+    assert canonical_scopes("", "Persons", None)[0] == "persons"

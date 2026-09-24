@@ -124,23 +124,76 @@
 - **Current mitigation:** `GeminiAgentModel` now appends the live document catalog (IDs, titles, and exact region names only, never document text) to the classify and resolve requests, and tells both steps that listed regions are in scope. Verified live after the fix: the same question answered with a citation to page 2 of the uploaded PDF. An A/B rerun with the catalog disabled showed that the chart and comparison outcomes below do not depend on it. Regression tests: `backend/tests/test_provider_catalog.py`.
 - **Proposed future fix:** None for this pattern.
 
-### Generated chart code using `if __name__ == "__main__":` refused by code policy — open
+### Generated chart code using `if __name__ == "__main__":` refused by code policy — mitigated
 
 - **Input:** "Create a bar chart comparing the literacy rates of Karnataka and Odisha.", run live repeatedly on 2026-09-24.
-- **Observed behavior:** The same request produced a chart on some runs and a refusal on others. Classification, evidence selection, and dataset hydration were identical down to the chunk IDs; the failing runs stopped at `code_policy_validation` with `Dunder name is forbidden: __name__`.
-- **Root cause:** The code generator sometimes wraps its program in the standard `if __name__ == "__main__":` idiom. The executor's AST policy forbids every dunder name (a deliberate defence against `__class__`/`__subclasses__` escapes), and a policy rejection goes straight to refusal instead of through the bounded repair loop.
-- **Safety impact:** None; the policy failed closed. The impact is availability (an intermittently refused chart).
-- **Current mitigation:** None yet. This touches the sandbox policy, so it is left for an explicit decision rather than changed alongside UI work.
-- **Proposed future fix:** Either tell the code-generation prompt not to use the idiom, route policy rejections through the existing single repair attempt with the policy error as feedback, or allow only the exact read-only comparison `__name__ == "__main__"`. The repair route is the most general and keeps the dunder ban intact.
+- **Observed behavior:** The same request produced a chart on some runs and a refusal on others. Classification, evidence, and hydration were identical down to the chunk IDs; failing runs stopped at `code_policy_validation` with `Dunder name is forbidden: __name__`. Later runs also showed `Forbidden attribute call: rename` and plain runtime crashes on large ranking tables.
+- **Root cause:** The model sometimes wraps its program in the `__main__` idiom, which the AST policy's dunder ban rejects. Policy violations deliberately never enter the repair loop, so the turn refused.
+- **Safety impact:** None; the policy failed closed.
+- **Current mitigation:** The policy and the no-repair rule are unchanged. Feeding policy errors back would let a hostile program iterate toward an evasion, and uploads now put untrusted document text in front of the model. Prevention happens upstream instead: the generation prompt forbids double-underscore names and `main()` guards, and `skills/table.md` and `skills/chart.md` now carry a known-good reference program. Both were verified to pass the policy, execute, and pass lineage validation on three real artifact inputs, and `test_skill_reference_programs_pass_the_executor_code_policy` keeps them from drifting. Verified live: the two-region chart went from 1 of 2 to 2 of 2, and rankings stopped failing at code generation.
+- **Proposed future fix:** None required. An exact allowlist for the read-only `__name__ == "__main__"` comparison would be a policy change and is not needed while prevention holds.
 
-### Three-region chart refused although all three values were found — open
+### Three-region chart refused although all three values were found — fixed
 
-- **Input:** "Create a bar chart comparing the literacy rates of Karnataka, Odisha and Madhya Pradesh.", run live five times on 2026-09-24 (three with the document catalog, two without); refused every time.
-- **Observed behavior:** Retrieval returned candidates for all three regions, but `evidence_assessment` returned `sufficient: false` while its own explanation said "All three requested entities … have direct answers for their literacy rates in 2011".
-- **Root cause (partial):** The assessment model's `sufficient` flag contradicts its explanation. The same pipeline succeeds for two regions, which points at the larger evidence pack for three targets; this has not yet been traced chunk by chunk.
-- **Safety impact:** None; the agent refused. The impact is availability for three-way artifacts.
-- **Current mitigation:** The UI's example prompt uses the reliable two-region chart.
-- **Proposed future fix:** Derive sufficiency deterministically from the per-target `selected_evidence_by_target` map (every required target has a direct-answer item) instead of trusting the model's boolean, and add a regression built from this real evidence pack.
+- **Input:** "Create a bar chart comparing the literacy rates of Karnataka, Odisha and Madhya Pradesh.", refused on all five live runs on 2026-09-24.
+- **Observed behavior:** The assessor's explanation claimed all three states had direct answers, but the verdict was insufficient.
+- **Root cause:** The explanation was wrong, not the verdict. The per-target trace showed Madhya Pradesh had no direct-answer chunk. Its Statement 19 table is split into eight fragments that repeat one header; only fragment `1f82157d` holds the state row (69.3), and it was not in the top 20 results. Lookups and comparisons already fetched sibling fragments of the best pages; charts and tables did not.
+- **Safety impact:** None; the deterministic per-target check correctly refused.
+- **Current mitigation:** Named-target artifacts now get the same sibling-page expansion (`call_tools`), and packing reserves the state-row fragment first. Verified live: 3 of 3 successful runs, plotted values Odisha 72.9, Madhya Pradesh 69.3, Karnataka 75.36, all matching the source. Regression test: `test_named_artifact_expands_pages_so_split_table_state_row_is_reserved`, which fails without the fix.
+- **Proposed future fix:** None remaining.
+
+### Scheduled Tribes sex ratio reported as the state's sex ratio — fixed
+
+- **Input:** "What was the sex ratio of Karnataka in 2011?", plus a Karnataka vs Odisha sex-ratio chart, run live 2026-09-24.
+- **Observed behavior:** One answer said "the total sex ratio in Karnataka was 990", with a citation whose cell really does read 990. The chart proposal also used 990. Karnataka's sex ratio is 973.
+- **Root cause:** In the source Markdown the table title ("Sex Ratio … among Scheduled Tribes by residence") is a plain paragraph under `### Statement 17`, not a heading. The chunker builds breadcrumbs from headings, so every fragment of that table said only "Statement 17", and nothing in the chunk mentioned Scheduled Tribes. Odisha's Statement 13 (Scheduled Castes, 987 against the true 979) has the same shape.
+- **Safety impact:** Real. A subgroup value could be presented as a whole-population figure with a valid-looking citation.
+- **Current mitigation:** The title paragraph survives as its own small chunk with the identical breadcrumb, so `AgentTools` re-attaches it to each table fragment's `section_path` at runtime (text and offsets untouched, no re-ingestion). Three deterministic guards then use it: citation validation rejects a whole-population claim quoting a Scheduled Caste, Scheduled Tribe, or child table (`SUBGROUP_TABLE_FOR_WHOLE_POPULATION_CLAIM`); hydration rejects such cells (`SUBGROUP_TABLE`); and ranking scans exclude such tables. The model prompts also show a `SECTION=` line. Verified live: the lookup now answers 973/979/963, and the chart binds 973. Regression tests: `backend/tests/test_subgroup_tables.py`, on the real chunks.
+- **Proposed future fix:** Fold statement title paragraphs into chunk breadcrumbs at ingestion. That re-embeds the corpus and changes the 2,058-point baseline, so it is deferred for an explicit decision.
+
+### Sex-ratio charts could never hydrate — fixed
+
+- **Input:** Every "Create a bar chart comparing the sex ratio of …" request on 2026-09-24.
+- **Root cause:** An unspecified population defaults to "persons", and hydration requires that word near the cell. Sex-ratio tables have no Persons/Male/Female column, because the metric already relates the two sexes. Rankings were exempt for exactly this reason; charts and tables were not.
+- **Current mitigation:** The same exemption now applies to any sex-ratio request with an unspecified population. Subgroup tables are excluded separately by title. Verified live: 2 of 2 charts.
+
+### Correct comparison refused and count difference labelled "percent" — fixed
+
+- **Input:** "Compare the sex ratio of Odisha and Madhya Pradesh.", about 1 in 3 live runs succeeding.
+- **Root cause:** The model cited an extra prose chunk that does not quote 931, and one unsupported citation invalidated the whole correct claim. The calculation also cited a second Odisha chunk no claim quoted, which failed a chunk-ID subset match. Separately, the app's own derived-claim renderer labelled every non-rate difference "percent" ("higher by 48 percent" for a 48-point gap).
+- **Current mitigation:** Citations that do not quote the claim's value are pruned when another citation verifies it; a claim with no supporting quote still fails, and integrity failures (unknown IDs, excluded pages, non-verbatim snippets) stay hard errors. Derived claims cite exactly their validated inputs and are matched to their calculation by operation and operands. Count differences carry no unit word. Pruned citations are recorded in the trace. Verified live: every completed run valid on the first pass, reading "Odisha is higher than Madhya Pradesh by 48." Regression tests use the real chunks.
+
+### Units stated only in a table title — fixed
+
+- **Input:** "What was the sex ratio in Madhya Pradesh in 2011?", declined live.
+- **Root cause:** The assessor marked the right row `has_unit=false` because the cell is a bare 931. The unit appears only in the title, and this fragment's breadcrumb is mis-attributed ("Statement 5: Proportion of rural and urban population").
+- **Current mitigation:** The prompt now says a unit in a title or column heading counts. A deterministic backstop treats a stated unit phrase, or a metric whose Census unit is fixed by definition (sex ratio, literacy rate, work participation rate; never raw counts), as a known unit. Verified live: 2 of 2.
+
+### District rankings refusing after the model's output shifted — fixed
+
+- **Input:** "Which district of <state> had the highest/lowest sex ratio?", which had succeeded earlier, refused for all three states on 2026-09-24.
+- **Root causes (one per state, found with a hydration spy in the running container):**
+  - **Madhya Pradesh:** the model began labelling rows with series "Total", which later split-table fragments identify only by column position.
+  - **Karnataka:** the model mis-copied one of 30 chunk UUIDs.
+  - **Odisha:** the completeness guard counted 68 "districts" for 30. It was reading table-of-contents lines and a "Decadal Change" graph table that spells districts differently.
+- **Current mitigation:**
+  - A residence-named series is accepted when the column-position fallback confirms the column.
+  - For rankings only, an unknown chunk ID rebinds to the single chunk containing a cell that passes every check; an ambiguous or missing match still fails.
+  - The completeness count ignores contents entries and counts only tables sharing the proposal's header layout.
+  - Separately, a "Total" population scope now means unspecified.
+- **Verified live:** Madhya Pradesh Balaghat 1,021, Karnataka Udupi 1,094, Odisha lowest Nayagarh 915 and highest Rayagada 1,051, each matching the source table.
+
+### Artifact repair path hit the graph step limit — fixed
+
+- **Root cause:** The longest legitimate path (artifact, one repair, refusal) takes 16 supersteps, exactly `AGENT_MAX_STEPS`. It escaped as an untyped `GraphRecursionError` (seen as a research section crash).
+- **Current mitigation:** The limit is 24 in Settings, `docker-compose.yml`, and `.env.example`. Any recursion-limit hit is now a typed, retryable `AGENT_STEP_LIMIT`, and a research section never sinks its brief.
+
+### District ranking by literacy rate — known limitation
+
+- **Input:** "Which district of Karnataka had the highest literacy rate?"
+- **Observed behavior:** Hydration refuses (`UNSUPPORTED_OR_WRONG_TABLE_CELL`).
+- **Root cause:** Literacy tables carry several near-identical numeric columns (2001 and 2011, each Total/Rural/Urban) next to sibling male and female tables, and the proposal does not bind reliably to the 2011 Total column. Fails closed.
+- **Current mitigation:** Deep Research plans district rankings for sex ratio only.
 
 ## Streamlit boundary failures
 

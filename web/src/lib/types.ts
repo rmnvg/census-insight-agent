@@ -77,13 +77,42 @@ export type ApiError = {
   retryable?: boolean;
 };
 
+export type ResearchSection = {
+  heading: string;
+  question: string;
+  status: "answered" | "declined" | "failed";
+  session_id: string;
+  response: ChatResponse | null;
+  error: ApiError | null;
+};
+
+export type ResearchReport = {
+  topic: string;
+  title: string;
+  in_scope: boolean;
+  reason: string | null;
+  sections: ResearchSection[];
+  verified_claim_count: number;
+  citation_count: number;
+  duration_seconds: number;
+};
+
 export type TranscriptEntry = {
   message_id: string;
   role: "user" | "assistant";
   created_at: string;
   content: string | null;
+  mode?: "chat" | "research";
   response: ChatResponse | null;
   error: ApiError | null;
+  report?: ResearchReport | null;
+};
+
+export type ResearchPlanEvent = {
+  title: string;
+  in_scope: boolean;
+  reason: string | null;
+  sections: { heading: string; question: string }[];
 };
 
 export type SessionTranscript = { session: SessionRecord; messages: TranscriptEntry[] };
@@ -160,3 +189,44 @@ export type UploadJob = {
 export type HealthStatus = "ok" | "error" | "unknown";
 
 export type ProgressStep = { node: string; label: string; at: number };
+
+export type TrustCaseResult = {
+  case_id: string;
+  category: "lookup" | "comparison" | "ranking" | "chart" | "refusal";
+  question: string;
+  expected: string;
+  passed: boolean;
+  outcome: "answered" | "refused" | "error";
+  answer_excerpt: string;
+  observed_values: number[];
+  missing: string[];
+  claims_checked: number;
+  ungrounded_claims: string[];
+  arithmetic_errors: string[];
+  uncited_claims: number;
+  citation_count: number;
+  artifact_types: string[];
+  latency_seconds: number;
+  attempts: number;
+  error_code: string | null;
+  trace_id: string | null;
+  source_note: string;
+};
+
+export type Scorecard = {
+  generated_at: string;
+  model: string;
+  cases_total: number;
+  cases_passed: number;
+  answerable_total: number;
+  answerable_passed: number;
+  refusal_total: number;
+  refusal_passed: number;
+  claims_checked: number;
+  ungrounded_claims: number;
+  uncited_claims: number;
+  arithmetic_errors: number;
+  wrong_answers: number;
+  median_latency_seconds: number;
+  results: TrustCaseResult[];
+};

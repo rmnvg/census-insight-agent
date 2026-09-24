@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     document_upload_max_pages: int = Field(default=400, ge=1)
     workspace_root: Path = Path("workspace")
     skills_dir: Path = Path("skills")
-    agent_max_steps: int = 16
+    # The longest legitimate path (artifact + one repair + refusal) takes 16 supersteps; the old
+    # limit of exactly 16 turned it into an untyped GraphRecursionError. Also in compose/.env.
+    agent_max_steps: int = 24
     agent_max_tool_calls: int = 12
     agent_memory_turn_threshold: int = 12
     agent_provider_timeout_seconds: float = 120.0

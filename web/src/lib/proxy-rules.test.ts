@@ -16,6 +16,7 @@ describe("proxy allowlist", () => {
     ["GET", `sessions/${SESSION}/messages`],
     ["GET", `sessions/${SESSION}/artifacts/${RUN}/files/chart.png`],
     ["POST", "chat/stream"],
+    ["POST", "research/stream"],
     ["GET", `runs/${RUN}/trace`],
     ["GET", "documents/census-2011-karnataka-pca-highlights/pages/50"],
     ["POST", "documents/upload"],

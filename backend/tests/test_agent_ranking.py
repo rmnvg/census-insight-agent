@@ -466,3 +466,92 @@ def test_hydrate_ignores_unit_description_not_present_in_local_fragment() -> Non
         proposal, ranking_requirement(), [evidence_item], "test query"
     )
     assert dataset.source_records[0].raw_value == "971"
+
+
+def test_hydrate_accepts_residence_named_series_on_fragment_missing_subheader() -> None:
+    # Live 2026-09-24: the model began labelling every ranking row with series="Total". On this
+    # fragment the Total column is identified only by group position, so the series check
+    # rejected Mandsaur's correct 2011 Total cell and every district ranking refused.
+    evidence_item = real_fragment_evidence()
+    row = proposed_row("Mandsaur", 963, evidence_id="chunk-mandsaur-ratlam").model_copy(
+        update={"series": "Total"}
+    )
+    proposal = ArtifactDatasetProposal(title="Sex ratio by district", rows=[row])
+    dataset = hydrate_artifact_dataset(
+        proposal, ranking_requirement(), [evidence_item], "test query"
+    )
+    assert dataset.source_records[0].raw_value == "963"
+
+
+def test_hydrate_rejects_series_that_contradicts_the_residence_column() -> None:
+    evidence_item = real_fragment_evidence()
+    # 971 is Ratlam's 2011 Total; a "Rural" series label must not bind to it.
+    row = proposed_row("Ratlam", 971, evidence_id="chunk-mandsaur-ratlam").model_copy(
+        update={"series": "Rural"}
+    )
+    proposal = ArtifactDatasetProposal(title="Sex ratio by district", rows=[row])
+    with pytest.raises(ProposalHydrationError):
+        hydrate_artifact_dataset(proposal, ranking_requirement(), [evidence_item], "test query")
+
+
+def test_garbled_ranking_evidence_id_rebinds_to_the_unique_matching_cell() -> None:
+    # Live 2026-09-24: in a 30-district Karnataka ranking the model mis-copied one chunk UUID.
+    evidence_item = real_fragment_evidence()
+    other = district_evidence(chunk_id="chunk-unrelated")
+    row = proposed_row("Ratlam", 971, evidence_id="chunk-mandsaur-ratlaM")
+    proposal = ArtifactDatasetProposal(title="Sex ratio by district", rows=[row])
+    dataset = hydrate_artifact_dataset(
+        proposal, ranking_requirement(), [other, evidence_item], "test query"
+    )
+    assert dataset.source_records[0].chunk_id == "chunk-mandsaur-ratlam"
+    assert dataset.source_records[0].raw_value == "971"
+
+
+def test_garbled_id_is_still_rejected_when_the_cell_is_ambiguous_or_not_ranking() -> None:
+    first = real_fragment_evidence()
+    duplicate = first.model_copy(update={"chunk_id": "chunk-duplicate-fragment"})
+    row = proposed_row("Ratlam", 971, evidence_id="not-a-real-chunk")
+    proposal = ArtifactDatasetProposal(title="Sex ratio by district", rows=[row])
+    with pytest.raises(ProposalHydrationError, match="UNKNOWN_EVIDENCE_ID"):
+        hydrate_artifact_dataset(proposal, ranking_requirement(), [first, duplicate], "q")
+    with pytest.raises(ProposalHydrationError, match="UNKNOWN_EVIDENCE_ID"):
+        hydrate_artifact_dataset(proposal, ranking_requirement(rank_all=False), [first], "q")
+
+
+def test_row_count_ignores_table_of_contents_entries() -> None:
+    # Live 2026-09-24: the Odisha "Contents" chunk ("| Statement - 6 : Sex ratio ... | 14 |")
+    # inflated the detected district count from 30 to 68 and refused a complete ranking.
+    contents = district_evidence(chunk_id="contents").model_copy(
+        update={
+            "text": (
+                "Contents\n\n| | Page |\n|---|---|\n"
+                "| Statement - 6 : Sex ratio (females per 1000 males) by residence | 14 |\n"
+                "| Graph - 5 : Sex ratio and decadal change by residence | 15 |\n"
+                "| Map - 3 : Sex ratio 2011 | 16 |\n"
+            ),
+            "section_path": ["Contents"],
+        }
+    )
+    fragment = real_fragment_evidence()
+    assert count_table_entity_rows([fragment, contents]) == count_table_entity_rows([fragment])
+    stray = contents.model_copy(update={"section_path": ["Introduction"], "chunk_id": "stray"})
+    assert count_table_entity_rows([fragment, stray]) == count_table_entity_rows([fragment])
+
+
+def test_completeness_counts_only_tables_the_proposal_used() -> None:
+    # Live: Odisha's graph-data table ("| District | Decadal Change (Points) |") spells districts
+    # differently from the ranking table and inflated the detected count.
+    from backend.app.execution.hydration import same_table_evidence
+
+    fragment = real_fragment_evidence()
+    decadal = district_evidence(chunk_id="decadal").model_copy(
+        update={
+            "text": (
+                "| District      | Decadal Change (Points) |\n|---|---|\n"
+                "| Balasore | 12 |\n| Deogarh | 7 |\n| Keonjhar | 5 |\n"
+            )
+        }
+    )
+    scoped = same_table_evidence([fragment, decadal], {fragment.chunk_id})
+    assert [item.chunk_id for item in scoped] == [fragment.chunk_id]
+    assert count_table_entity_rows(scoped) == count_table_entity_rows([fragment])

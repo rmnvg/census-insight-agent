@@ -79,3 +79,19 @@ body {
 .animate-step-in {
   animation: step-in 220ms ease-out both;
 }
+
+/* Chart roles (dataviz reference palette, validated all-pairs for 3 slots in both modes). */
+.viz-root {
+  --viz-accent: #0d9488;
+  --viz-series-1: #2a78d6;
+  --viz-series-2: #eb6834;
+  --viz-series-3: #1baf7a;
+  --viz-grid: rgb(0 0 0 / 0.07);
+}
+.dark .viz-root {
+  --viz-accent: #14b8a6;
+  --viz-series-1: #3987e5;
+  --viz-series-2: #d95926;
+  --viz-series-3: #199e70;
+  --viz-grid: rgb(255 255 255 / 0.08);
+}

@@ -1,4 +1,4 @@
-.PHONY: web-install web-check web-dev sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
+.PHONY: trust-benchmark web-install web-check web-dev sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
 
 sync:
 	uv sync --frozen
@@ -43,6 +43,10 @@ initialize-corpus:
 
 live-eval:
 	uv run --frozen python scripts/live_evaluation.py
+
+# Billable: every case is a full agent turn. Copy the output to evals/ to ship it with the repo.
+trust-benchmark:
+	uv run --frozen python scripts/trust_benchmark.py --allow-paid-calls --output data/processed/trust-scorecard.json
 
 run-backend:
 	uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload

@@ -7,6 +7,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ChatView } from "./chat-view";
 import { LibraryDialog } from "./library-dialog";
 import { Sidebar } from "./sidebar";
+import { TrustView } from "./trust-view";
 
 function sessionFromPath(pathname: string): string | null {
   const match = /^\/c\/([0-9a-f]{32})\/?$/.exec(pathname);
@@ -70,7 +71,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         >
           <Menu className="size-5" />
         </button>
-        <ChatView key={sessionId ?? `new-${chatKey}`} sessionId={sessionId} onOpenLibrary={() => setLibraryOpen(true)} />
+        {pathname === "/trust" ? (
+          <TrustView />
+        ) : (
+          <ChatView key={sessionId ?? `new-${chatKey}`} sessionId={sessionId} onOpenLibrary={() => setLibraryOpen(true)} />
+        )}
         {children}
       </main>
       <LibraryDialog open={libraryOpen} onClose={() => setLibraryOpen(false)} />

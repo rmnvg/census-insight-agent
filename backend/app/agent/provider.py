@@ -15,6 +15,7 @@ from backend.app.agent.models import (
     CalculationResult,
     DraftAnswer,
     EvidenceAssessment,
+    ResearchPlan,
     ResolvedQuery,
     SupportAssessment,
     TaskClassification,
@@ -282,6 +283,34 @@ Do not answer the question.""",
             f"Current request:\n{query}",
         )
 
+    async def plan_research(self, topic: str) -> ResearchPlan:
+        """Decompose a topic into questions the citation-validated agent can answer.
+
+        The plan contributes only headings and questions; every factual statement in the brief
+        comes from a separately validated agent turn per question.
+        """
+        return await self._structured(
+            ResearchPlan,
+            """Plan a short research brief that will be answered ONLY from the supplied Indian
+Census 2011 reports. Do not answer anything yourself.
+If the topic cannot be addressed from Census population data (e.g. GDP, income, health outcomes,
+other countries, events after 2011), set in_scope=false, give a one-sentence reason, and no
+sections.
+Otherwise return a title (at most 80 characters) and 3 to 5 sections. Each section has a heading
+(at most 60 characters) and ONE self-contained question the assistant can answer with citations:
+- Name every region explicitly using the exact region names in the supplied documents list; never
+  write "the state", "it", or "these regions".
+- Ask about ONE whole-population metric for 2011: literacy rate, sex ratio, or total population.
+  Do not ask about male/female, child, age-group, rural/urban, caste, or tribe subgroups; each
+  section must be answerable from a state's or district's total-persons figure.
+- Use one of these forms: a lookup for one region; a comparison of two named regions; "Which
+  district of <region> had the highest/lowest sex ratio?" (district rankings use sex ratio only);
+  or "Create a bar chart comparing the <literacy rate or sex ratio> of <region> and <region>."
+- Include at most one chart section and at most one district-ranking section.
+- Order sections from the headline figure to detail. Do not repeat a question.""",
+            f"{await self._catalog_note()}Research topic:\n{topic}",
+        )
+
     async def resolve(self, query: str, context: list[BaseMessage]) -> ResolvedQuery:
         return await self._structured(
             ResolvedQuery,
@@ -302,7 +331,8 @@ Regions named in the supplied documents list are valid targets; use their exact 
     ) -> EvidenceAssessment:
         excerpts = "\n\n".join(
             f"EVIDENCE_ID={item.chunk_id}\nDOCUMENT={item.document_title}\n"
-            f"REGION={item.region}\nPAGE={item.page_number}\nTEXT={item.text}"
+            f"REGION={item.region}\nPAGE={item.page_number}\n"
+            f"SECTION={' > '.join(item.section_path)}\nTEXT={item.text}"
             for item in evidence
         )
         return await self._structured(
@@ -314,6 +344,12 @@ that dimension. If population or residence is unspecified, use the corpus conven
 and Total. A Total column in a Persons table is a scope match for an unqualified state literacy
 question. Never mark residence_scope_match=false merely because the user omitted residence.
 For an explicit rural/urban/total breakdown, each requested residence column is compatible.
+has_unit is true when the unit is stated anywhere in the candidate, including its table title or
+column heading (e.g. "Sex Ratio (number of females per 1000 males)", "%", "per cent"); population
+counts are in persons.
+SECTION names the table a candidate comes from. A table for a population subgroup (Scheduled
+Castes, Scheduled Tribes, children aged 0-6) does not match a question about the whole population:
+set population_scope_match=false for it unless the question asks about that subgroup.
 A definition or table heading is only supporting_definition. Topical overlap without the requested
 value is related_non_answering. Treat numerically compatible rounding as compatible_rounding, not a
 conflict; contradictory values with the same scope are conflicting. Select only direct evidence,
@@ -341,7 +377,7 @@ IDs.""",
     ) -> DraftAnswer:
         evidence_text = "\n\n".join(
             f"EVIDENCE_ID={item.chunk_id}\nDOCUMENT={item.document_title}\n"
-            f"PAGE={item.page_number}\nTEXT={item.text}"
+            f"PAGE={item.page_number}\nSECTION={' > '.join(item.section_path)}\nTEXT={item.text}"
             for item in evidence
         )
         claim_scope = (
@@ -501,7 +537,8 @@ claims.""",
         rank_all: bool = False,
     ) -> ArtifactDatasetProposal:
         excerpts = "\n\n".join(
-            f"EVIDENCE_ID={item.chunk_id}\nREGION={item.region}\nTEXT={item.text}"
+            f"EVIDENCE_ID={item.chunk_id}\nREGION={item.region}\n"
+            f"SECTION={' > '.join(item.section_path)}\nTEXT={item.text}"
             for item in evidence
         )
         row_instruction = (
@@ -547,7 +584,9 @@ table header or section heading. Never omit a requested entity/category combinat
             """Write task-specific Python that reads only Path('input.json') and writes only the
 declared relative output paths. Use only json, math, statistics, decimal, pathlib, pandas, numpy,
 matplotlib, and seaborn. Do not use open, eval, exec, compile, networking, processes, threads,
-dynamic imports, absolute paths, or parent traversal. The JSON root is an envelope with `dataset`
+dynamic imports, absolute paths, or parent traversal. Never reference any double-underscore name
+(no `__name__`, `__file__`, `__main__`, `__class__`): write plain top-level statements, not an
+`if __name__ == "__main__":` block or a `main()` guard. The JSON root is an envelope with `dataset`
 and `source_manifest` keys: read rows and display metadata from `payload["dataset"]`, and write
 `payload["source_manifest"]` unchanged to the declared manifest output. The output directory already
 exists; do not create directories. Use literal relative output paths or variables assigned directly

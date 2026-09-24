@@ -11,17 +11,39 @@ import {
   type ReactNode,
 } from "react";
 
-import { api, ApiRequestError, streamChat } from "@/lib/api";
+import { api, ApiRequestError, streamChat, streamResearch } from "@/lib/api";
 import type {
   ApiError,
   DocumentSummary,
   ProgressStep,
+  ResearchSection,
   SessionRecord,
   SessionSummary,
   TranscriptEntry,
 } from "@/lib/types";
 
-export type Pending = { text: string; steps: ProgressStep[]; startedAt: number };
+export type PendingSection = {
+  heading: string;
+  question: string;
+  state: "queued" | "running" | "done";
+  steps: ProgressStep[];
+  result: ResearchSection | null;
+};
+
+export type PendingResearch = {
+  title: string | null;
+  inScope: boolean;
+  reason: string | null;
+  sections: PendingSection[];
+};
+
+export type Pending = {
+  text: string;
+  steps: ProgressStep[];
+  startedAt: number;
+  mode: "chat" | "research";
+  research: PendingResearch | null;
+};
 
 export type Thread = {
   status: "loading" | "ready" | "missing" | "error";
@@ -38,7 +60,7 @@ type ChatContextValue = {
   refreshSessions: () => Promise<void>;
   refreshDocuments: () => Promise<void>;
   loadThread: (id: string, options?: { quiet?: boolean }) => Promise<void>;
-  send: (sessionId: string | null, text: string) => Promise<string | null>;
+  send: (sessionId: string | null, text: string, mode?: "chat" | "research") => Promise<string | null>;
   rename: (id: string, title: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
 };
@@ -131,7 +153,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   );
 
   const send = useCallback(
-    async (sessionId: string | null, text: string) => {
+    async (sessionId: string | null, text: string, mode: "chat" | "research" = "chat") => {
       let id = sessionId;
       if (id && threadsRef.current[id]?.pending) return id;
       if (!id) {
@@ -149,28 +171,63 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const threadId = id;
       patchThread(threadId, (thread) => ({
         ...thread,
-        pending: { text, steps: [], startedAt: Date.now() },
+        pending: { text, steps: [], startedAt: Date.now(), mode, research: null },
       }));
-      const userEntry = localEntry("user", { content: text });
+      const userEntry = localEntry("user", { content: text, mode });
+      const updatePending = (update: (pending: Pending) => Pending) =>
+        patchThread(threadId, (thread) => (thread.pending ? { ...thread, pending: update(thread.pending) } : thread));
+      const updateSection = (index: number, update: (section: PendingSection) => PendingSection) =>
+        updatePending((pending) =>
+          pending.research
+            ? {
+                ...pending,
+                research: {
+                  ...pending.research,
+                  sections: pending.research.sections.map((section, position) =>
+                    position === index ? update(section) : section,
+                  ),
+                },
+              }
+            : pending,
+        );
       try {
-        const response = await streamChat(threadId, text, {
-          onProgress: (node, label) =>
-            patchThread(threadId, (thread) =>
-              thread.pending
-                ? {
-                    ...thread,
-                    pending: {
-                      ...thread.pending,
-                      steps: [...thread.pending.steps, { node, label, at: Date.now() }],
-                    },
-                  }
-                : thread,
-            ),
-        });
+        let assistant: TranscriptEntry;
+        if (mode === "research") {
+          const report = await streamResearch(threadId, text, {
+            onPlan: (plan) =>
+              updatePending((pending) => ({
+                ...pending,
+                research: {
+                  title: plan.title,
+                  inScope: plan.in_scope,
+                  reason: plan.reason,
+                  sections: plan.sections.map((section) => ({ ...section, state: "queued", steps: [], result: null })),
+                },
+              })),
+            onSectionStarted: (index) => updateSection(index, (section) => ({ ...section, state: "running" })),
+            onProgress: (index, node, label) =>
+              updateSection(index, (section) => ({
+                ...section,
+                steps: [...section.steps, { node, label, at: Date.now() }],
+              })),
+            onSectionDone: (index, result) =>
+              updateSection(index, (section) => ({ ...section, state: "done", result })),
+          });
+          assistant = localEntry("assistant", { report });
+        } else {
+          const response = await streamChat(threadId, text, {
+            onProgress: (node, label) =>
+              updatePending((pending) => ({
+                ...pending,
+                steps: [...pending.steps, { node, label, at: Date.now() }],
+              })),
+          });
+          assistant = localEntry("assistant", { response });
+        }
         patchThread(threadId, (thread) => ({
           ...thread,
           pending: null,
-          messages: [...thread.messages, userEntry, localEntry("assistant", { response })],
+          messages: [...thread.messages, userEntry, assistant],
         }));
       } catch (error) {
         const apiError: ApiError =

@@ -69,3 +69,15 @@ describe("snippet and artifact text", () => {
     ]);
   });
 });
+
+describe("breadcrumb-prefixed table quotes", () => {
+  it("previews the data row when the quote starts with its breadcrumb", () => {
+    // Shape of a live Karnataka Statement 19 citation.
+    const snippet = `**Census of India 2011** > **Chapter-3** > Statement 19 > Literates and Literacy Rate by residence : 2011 (Persons)
+
+| State / District Code | State / District | Literates 2011 |
+|-----------------------|------------------|----------------|
+| -                     | <b>KARNATAKA</b> | <b>4,06,47,322</b> |`;
+    expect(snippetPreview(snippet)).toBe("- · KARNATAKA · 4,06,47,322");
+  });
+});

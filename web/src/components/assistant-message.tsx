@@ -2,6 +2,7 @@
 
 import {
   AlertTriangle,
+  CornerDownRight,
   Calculator,
   Check,
   Copy,
@@ -15,6 +16,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { answerIsClaims, snippetPreview, stripDownloadLinks, stripSourcesSection } from "@/lib/answer";
+import { suggestFollowUps } from "@/lib/followups";
 import { citationNumbers, describeDerivation, orderedCitations } from "@/lib/trace";
 import type { ApiError, ChatResponse, Citation, Claim } from "@/lib/types";
 
@@ -23,7 +25,18 @@ import { LogoMark } from "./logo";
 import { PageViewer } from "./page-viewer";
 import { TracePanel } from "./trace-panel";
 
-export function AssistantMessage({ response }: { response: ChatResponse }) {
+export function AssistantMessage({
+  response,
+  onFollowUp,
+  libraryRegions = [],
+  embedded = false,
+}: {
+  response: ChatResponse;
+  onFollowUp?: (prompt: string) => void;
+  libraryRegions?: string[];
+  /** Rendered inside a research brief: no avatar, status badge or follow-ups. */
+  embedded?: boolean;
+}) {
   const [viewing, setViewing] = useState<Citation | null>(null);
   const [copied, setCopied] = useState(false);
   const citations = orderedCitations(response.citations);
@@ -46,9 +59,9 @@ export function AssistantMessage({ response }: { response: ChatResponse }) {
 
   return (
     <div className="flex gap-3">
-      <LogoMark className="mt-0.5 size-7 shrink-0" />
+      {!embedded && <LogoMark className="mt-0.5 size-7 shrink-0" />}
       <div className="min-w-0 flex-1 space-y-4">
-        <StatusBadge response={response} />
+        {!embedded && <StatusBadge response={response} />}
 
         {claimsAreAnswer ? (
           <div className="answer-prose">
@@ -158,8 +171,39 @@ export function AssistantMessage({ response }: { response: ChatResponse }) {
           </button>
           <TracePanel runId={response.trace_id} />
         </div>
+
+        {onFollowUp && !embedded && <FollowUps response={response} regions={libraryRegions} onPick={onFollowUp} />}
       </div>
       {viewing && <PageViewer key={viewing.citation_id} citation={viewing} onClose={() => setViewing(null)} />}
+    </div>
+  );
+}
+
+function FollowUps({
+  response,
+  regions,
+  onPick,
+}: {
+  response: ChatResponse;
+  regions: string[];
+  onPick: (prompt: string) => void;
+}) {
+  const suggestions = suggestFollowUps(response, regions);
+  if (!suggestions.length) return null;
+  return (
+    <div className="flex flex-wrap gap-2 pt-1">
+      {suggestions.map((item) => (
+        <button
+          key={item.prompt}
+          type="button"
+          title={item.prompt}
+          onClick={() => onPick(item.prompt)}
+          className="flex items-center gap-1.5 rounded-full border border-zinc-200 px-3 py-1.5 text-xs text-zinc-700 transition hover:border-teal-600/40 hover:bg-teal-50/50 hover:text-teal-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-teal-950/30 dark:hover:text-teal-200"
+        >
+          <CornerDownRight className="size-3 text-zinc-400" />
+          {item.label}
+        </button>
+      ))}
     </div>
   );
 }

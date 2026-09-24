@@ -6,6 +6,7 @@ from backend.app.agent.quotes import (
     resolve_evidence_span,
     select_evidence_span_with_diagnostic,
 )
+from backend.app.agent.scopes import unrequested_subgroups
 from backend.app.retrieval.models import RetrievedEvidence
 
 
@@ -16,6 +17,9 @@ class CitationValidationResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
     error_codes: list[str] = Field(default_factory=list)
     quote_diagnostics: list[QuoteSelectionDiagnostic] = Field(default_factory=list)
+    # (claim_id, evidence_id) pairs dropped because that chunk did not contain the claim's
+    # value while another cited chunk did; the claim stays supported by verbatim quotes.
+    pruned_citations: list[tuple[str, str]] = Field(default_factory=list)
 
 
 def validate_and_materialize_citations(
@@ -31,12 +35,19 @@ def validate_and_materialize_citations(
     errors: list[str] = []
     error_codes: list[str] = []
     quote_diagnostics: list[QuoteSelectionDiagnostic] = []
+    pruned: list[tuple[str, str]] = []
+    claim_citations: dict[str, list[str]] = {}
     for claim in draft.claims:
         matching_calculation = next(
             (
                 item
                 for item in calculations or []
                 if set(item.evidence_ids) <= set(claim.evidence_ids)
+                or (
+                    claim.derivation is not None
+                    and claim.derivation.operation == item.operation
+                    and claim.derivation.operands == item.values
+                )
             ),
             None,
         )
@@ -61,7 +72,21 @@ def validate_and_materialize_citations(
             errors.append(f"Claim {claim.claim_id} has no citation evidence")
             error_codes.append("CLAIM_WITHOUT_EVIDENCE")
         citation_ids: list[str] = []
-        for evidence_id in claim.evidence_ids:
+        unsupported: list[str] = []
+        errors_for_subgroup: list[str] = []
+        if is_derived and claim.derivation is not None:
+            # A derived claim cites exactly what its validated input claims cite.
+            for input_id in claim.derivation.input_claim_ids:
+                inherited = claim_citations.get(input_id, [])
+                if not inherited:
+                    errors.append(
+                        f"Derived claim {claim.claim_id} lacks source citation for {input_id}"
+                    )
+                    error_codes.append("DERIVED_MISSING_INPUT_CITATIONS")
+                citation_ids.extend(value for value in inherited if value not in citation_ids)
+        for evidence_id in (
+            [] if is_derived and claim.derivation is not None else claim.evidence_ids
+        ):
             item = by_id.get(evidence_id)
             if item is None:
                 errors.append(f"Claim {claim.claim_id} references unknown evidence {evidence_id}")
@@ -91,11 +116,16 @@ def validate_and_materialize_citations(
                     )
                     error_codes.append("DERIVED_MISSING_INPUT_CITATIONS")
                 continue
+            request = f"{claim.text} {claim.metric or ''} {claim.population_scope or ''}"
+            if unrequested_subgroups(" ".join(item.section_path), request):
+                # A Scheduled Caste/Tribe or child table never supports a whole-population claim.
+                errors_for_subgroup.append(evidence_id)
+                unsupported.append(evidence_id)
+                continue
             span, diagnostic = select_evidence_span_with_diagnostic(claim, item)
             quote_diagnostics.append(diagnostic)
             if span is None:
-                errors.append(f"Evidence {evidence_id} has no claim-supporting quote")
-                error_codes.append("CLAIM_QUOTE_NOT_FOUND")
+                unsupported.append(evidence_id)
                 continue
             snippet = resolve_evidence_span(span, item)
             key = (claim.claim_id, item.chunk_id)
@@ -116,6 +146,18 @@ def validate_and_materialize_citations(
                         evidence_span=span,
                     )
                 )
+        if unsupported:
+            if citation_ids and not is_derived:
+                pruned.extend((claim.claim_id, evidence_id) for evidence_id in unsupported)
+            else:
+                errors.extend(
+                    f"Evidence {evidence_id} has no claim-supporting quote"
+                    for evidence_id in unsupported
+                )
+                error_codes.append("CLAIM_QUOTE_NOT_FOUND")
+                if errors_for_subgroup:
+                    error_codes.append("SUBGROUP_TABLE_FOR_WHOLE_POPULATION_CLAIM")
+        claim_citations[claim.claim_id] = citation_ids
         claims.append(
             AnswerClaim(
                 claim_id=claim.claim_id,
@@ -139,6 +181,7 @@ def validate_and_materialize_citations(
         errors=errors,
         error_codes=list(dict.fromkeys(error_codes)),
         quote_diagnostics=quote_diagnostics,
+        pruned_citations=pruned,
     )
 
 
