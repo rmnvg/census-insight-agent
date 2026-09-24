@@ -34,11 +34,13 @@ const SEPARATOR_ROW = /^\|?[\s\-:|]+\|?$/;
 
 /** Parse a Markdown pipe-table quote into rows; null when the snippet is prose. */
 export function parseSnippetTable(snippet: string): SnippetCell[][] | null {
+  // Real quotes often open with the chunk breadcrumb ("Census of India 2011 > Chapter-3 > ...")
+  // before the table itself; only the pipe rows are the table.
   const lines = snippet
     .split("\n")
     .map((line) => line.trim())
-    .filter(Boolean);
-  if (!lines.length || !lines.every((line) => line.startsWith("|"))) return null;
+    .filter((line) => line.startsWith("|"));
+  if (lines.length < 2) return null;
   const rows = lines
     .filter((line) => !SEPARATOR_ROW.test(line))
     .map((line) =>
