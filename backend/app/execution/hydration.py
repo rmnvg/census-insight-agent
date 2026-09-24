@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 from typing import cast
 
 from backend.app.agent.models import ArtifactDataRequirement
+from backend.app.agent.scopes import unrequested_subgroups
 from backend.app.execution.contracts import (
     ArtifactDataset,
     ArtifactDatasetProposal,
@@ -16,6 +17,8 @@ _MARKDOWN = re.compile(r"[*_`]+")
 _NUMBER = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?(?!\w)")
 _WORD = re.compile(r"[a-z0-9]+")
 _PLACEHOLDER_CELL = re.compile(r"[-–—_.]+")
+_POPULATION_FREE_METRIC = re.compile(r"\b(?:sex|gender)[\s-]*ratio\b", re.IGNORECASE)
+_CONTENTS_ENTRY = re.compile(r"^(?:(?:statement|graph|map|chapter|table|figure|annexure)\b|page$)")
 
 
 class ProposalHydrationError(ValueError):
@@ -210,6 +213,12 @@ def _match_row(
         _fold(proposal.label) == _fold(region) for region in requirement.regions
     ):
         raise ProposalHydrationError("WRONG_REQUIRED_REGION")
+    if unrequested_subgroups(
+        " ".join(evidence.section_path),
+        f"{requirement.metric} {requirement.population_scope or ''}",
+    ):
+        # e.g. the Scheduled Tribes sex-ratio table for a plain sex-ratio chart.
+        raise ProposalHydrationError("SUBGROUP_TABLE")
     year = _same_scope(
         str(requirement.year) if requirement.year is not None else None,
         str(proposal.year) if proposal.year is not None else None,
@@ -283,7 +292,15 @@ def _match_row(
                 if not required_categories and _fold(cast(str, population)) not in _fold(context):
                     continue
             if proposal.series and _fold(proposal.series) not in _fold(header):
-                continue
+                # A series naming the residence ("Total") is the residence column itself, which
+                # later fragments of a split table identify only by group position (their
+                # "Total | Rural | Urban" sub-header row stays on the first fragment).
+                series_is_residence = _fold(proposal.series) == _fold(residence)
+                if not (
+                    series_is_residence
+                    and _residence_by_group_position(column, header_rows, width, residence)
+                ):
+                    continue
             if require_unit_match and not _unit_supported(proposal.unit, header, context):
                 continue
             raw_tokens = [
@@ -314,6 +331,32 @@ _HEADER_LABELS = {
 }
 
 
+def table_signature(text: str) -> str | None:
+    """The first pipe-table header line, normalized; fragments of one table share it."""
+    for line in text.splitlines():
+        if line.count("|") >= 2:
+            cells = [_fold(cell) for cell in _table_cells(line)]
+            return "|".join(" ".join(cell.split()) for cell in cells)
+    return None
+
+
+def same_table_evidence(
+    evidence: list[RetrievedEvidence], used_chunk_ids: set[str]
+) -> list[RetrievedEvidence]:
+    """Evidence whose table layout matches a table the proposal actually drew rows from.
+
+    A metric's chunks can include other tables that list the same entities under different
+    spellings (live: Odisha's "Decadal Change (Points)" graph data used "Balasore" where the
+    ranking table says "Baleshwar"), which inflated the completeness count.
+    """
+    signatures = {
+        signature
+        for item in evidence
+        if item.chunk_id in used_chunk_ids and (signature := table_signature(item.text))
+    }
+    return [item for item in evidence if table_signature(item.text) in signatures]
+
+
 def count_table_entity_rows(evidence: list[RetrievedEvidence]) -> int:
     """Best-effort, deterministic count of distinct table-row entities across evidence.
 
@@ -326,6 +369,10 @@ def count_table_entity_rows(evidence: list[RetrievedEvidence]) -> int:
     """
     labels: set[str] = set()
     for item in evidence:
+        # Table-of-contents chunks list "Statement - 6 : Sex ratio ... | 14" as pipe rows; each
+        # line looked like an entity (live: Odisha counted 68 "districts" for 30).
+        if any(_fold(part) in {"contents", "table of contents"} for part in item.section_path):
+            continue
         state_row = item.region.strip().casefold()
         for line in item.text.splitlines():
             if line.count("|") < 2:
@@ -350,8 +397,34 @@ def count_table_entity_rows(evidence: list[RetrievedEvidence]) -> int:
             folded = re.sub(r"\s*/\s*", "/", label.casefold())
             if not folded or folded in _HEADER_LABELS or (state_row and folded == state_row):
                 continue
+            if _CONTENTS_ENTRY.match(folded):
+                continue
             labels.add(folded)
     return len(labels)
+
+
+def _unique_matching_evidence(
+    row: ArtifactRowProposal,
+    evidence: list[RetrievedEvidence],
+    requirement: ArtifactDataRequirement,
+    *,
+    require_population_scope: bool,
+) -> RetrievedEvidence | None:
+    matches: list[RetrievedEvidence] = []
+    for candidate in evidence:
+        try:
+            _match_row(
+                row.model_copy(update={"evidence_id": candidate.chunk_id}),
+                candidate,
+                requirement,
+                require_region_label=False,
+                require_population_scope=require_population_scope,
+                require_unit_match=False,
+            )
+        except ProposalHydrationError:
+            continue
+        matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
 
 
 def hydrate_artifact_dataset(
@@ -376,7 +449,13 @@ def hydrate_artifact_dataset(
     expected_type = requirement.artifact_type
     if not proposal.rows:
         raise ProposalHydrationError("EMPTY_PROPOSAL")
-    skip_population_match = requirement.rank_all and requirement.population_scope is None
+    # Sex ratio has no Persons/Male/Female column: the metric already relates the two sexes.
+    # Rankings were exempt from the defaulted population check for that reason; charts and
+    # tables of sex ratio were not, so they could never hydrate (live: every Karnataka vs Odisha
+    # sex-ratio chart refused). Subgroup tables are excluded separately by title.
+    skip_population_match = requirement.population_scope is None and (
+        requirement.rank_all or _POPULATION_FREE_METRIC.search(requirement.metric) is not None
+    )
     if requirement.population_scope is None:
         # "Total persons" is the documented default population category when a request does not
         # specify male/female/persons explicitly (see DESIGN.md). For an ordinary chart/table
@@ -402,6 +481,16 @@ def hydrate_artifact_dataset(
     seen_scopes: set[tuple[str, str]] = set()
     for index, row in enumerate(proposal.rows, 1):
         item = by_id.get(row.evidence_id)
+        if item is None and requirement.rank_all:
+            # A ranking proposal copies one 36-character chunk ID per district, and the model
+            # occasionally garbles one (live: Karnataka, 30 rows). The ID is only the model's
+            # pointer; the cell check below is the provenance. Rebind only when exactly one
+            # trusted chunk contains a cell passing every check.
+            item = _unique_matching_evidence(
+                row, evidence, requirement, require_population_scope=not skip_population_match
+            )
+            if item is not None:
+                row = row.model_copy(update={"evidence_id": item.chunk_id})
         if item is None:
             raise ProposalHydrationError("UNKNOWN_EVIDENCE_ID")
         if not re.fullmatch(r"[0-9a-f]{64}", item.source_checksum):

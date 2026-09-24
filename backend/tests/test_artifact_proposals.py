@@ -726,3 +726,15 @@ def test_google_invalid_schema_error_is_classified_without_leaking_text() -> Non
     mapped = map_provider_error(error)
     assert mapped.code == "MODEL_SCHEMA_REJECTED"
     assert "secret-provider-detail" not in str(mapped)
+
+
+def test_artifact_code_prompt_forbids_the_main_guard_the_policy_rejects() -> None:
+    # Live failure: generated charts used `if __name__ == "__main__":`, which the AST policy's
+    # dunder ban rejects; policy violations are deliberately never repaired, so prevent it upstream.
+    chat = RecordingStructuredModel()
+    model = GeminiAgentModel(chat, max_retries=0)  # type: ignore[arg-type]
+    value = hydrate_artifact_dataset(proposal(), requirement(), evidence(), "chart request")
+    asyncio.run(model.generate_artifact_code(value, "Create a bar chart."))
+    prompt = "\n".join(str(message.content) for message in cast(list[Any], chat.messages[-1]))
+    assert '`if __name__ == "__main__":`' in prompt
+    assert "double-underscore" in prompt

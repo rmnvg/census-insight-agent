@@ -196,3 +196,22 @@ def bound_assessment_evidence(
         if not progressed:
             break
     return selected
+
+
+_UNIT_PHRASE = re.compile(
+    r"per\s*(?:1,?000|thousand|cent|lakh)|percent|%|\bnumber of\b|\bpersons\b",
+    re.IGNORECASE,
+)
+# Census metrics whose unit is fixed by definition: sex ratios are always females per 1,000
+# males and these rates are always percentages. Raw counts get no such exemption, since those
+# could be in thousands or lakhs.
+_DEFINED_UNIT_METRIC = re.compile(
+    r"\b(?:child\s+)?sex[\s-]*ratio\b|\bliteracy\s+rate\b|\bwork\s+participation\s+rate\b",
+    re.IGNORECASE,
+)
+
+
+def unit_known(text: str) -> bool:
+    """True when a chunk states a unit, or names a metric whose Census unit is fixed."""
+    plain = _HTML_TAG.sub(" ", text)
+    return bool(_UNIT_PHRASE.search(plain) or _DEFINED_UNIT_METRIC.search(plain))

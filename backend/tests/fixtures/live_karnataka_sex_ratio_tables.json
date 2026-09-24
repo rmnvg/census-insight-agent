@@ -1,0 +1,78 @@
+{
+ "st_title": {
+  "text": "**Census of India 2011** > **Chapter-2** > Statement 17\n\nSex Ratio (number of females per 1000 males) among Scheduled Tribes by residence : 2001-2011",
+  "chunk_id": "40684762-259f-5b48-a7e0-8d09aec96ac6",
+  "document_id": "census-2011-karnataka-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Karnataka",
+  "region": "Karnataka",
+  "page_number": 46,
+  "section_path": [
+   "**Census of India 2011**",
+   "**Chapter-2**",
+   "Statement 17"
+  ],
+  "chunk_index": 176,
+  "citation_snippet": "Sex Ratio (number of females per 1000 males) among Scheduled Tribes by residence : 2001-2011",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+ },
+ "st_table": {
+  "text": "**Census of India 2011** > **Chapter-2** > Statement 17\n\n| State / District Code | State / District | Sex Ratio 2001 |            |            | Sex Ratio 2011 |            |            |\n|-----------------------|------------------|----------------|------------|------------|----------------|------------|------------|\n|                       |                  | Total          | Rural      | Urban      | Total          | Rural      | Urban      |\n| 1                     | 2                | 3              | 4          | 5          | 6              | 7          | 8          |\n| -                     | <b>KARNATAKA</b> | <b>972</b>     | <b>975</b> | <b>960</b> | <b>990</b>     | <b>990</b> | <b>993</b> |\n| 555                   | Belgaum          | 980            | 980        | 975        | 999            | 997        | 1,011      |\n| 556                   | Bagalkot         | 996            | 995        | 1,000      | 1,005          | 1,004      | 1,011      |\n| 557                   | Bijapur          | 944            | 941        | 973        | 974            | 963        | 1,025      |\n| 558                   | Bidar            | 950            | 952        | 920        | 969            | 967        | 989        |\n| 559                   | Raichur          | 993            | 996        | 961        | 1,016          | 1,017      | 1,002      |\n| 560                   | Koppal           | 978            | 977        | 992        | 985            | 982        | 1,028      |",
+  "chunk_id": "6c942aeb-ee2b-5f2a-a692-322edfa2e46b",
+  "document_id": "census-2011-karnataka-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Karnataka",
+  "region": "Karnataka",
+  "page_number": 46,
+  "section_path": [
+   "**Census of India 2011**",
+   "**Chapter-2**",
+   "Statement 17"
+  ],
+  "chunk_index": 177,
+  "citation_snippet": "| State / District Code | State / District | Sex Ratio 2001 |            |            | Sex Ratio 2011 |            |            |",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+ },
+ "all_persons_table": {
+  "text": "**Census of India 2011** > **Chapter-1** > Statement 6\n\n| State / District Code | State / District | Sex Ratio 2001 |            |            | Sex Ratio 2011 |            |            |\n|-----------------------|------------------|----------------|------------|------------|----------------|------------|------------|\n|                       |                  | Total          | Rural      | Urban      | Total          | Rural      | Urban      |\n| 1                     | 2                | 3              | 4          | 5          | 6              | 7          | 8          |\n| -                     | <b>KARNATAKA</b> | <b>965</b>     | <b>977</b> | <b>942</b> | <b>973</b>     | <b>979</b> | <b>963</b> |\n| 555                   | Belgaum          | 960            | 963        | 950        | 973            | 970        | 979        |\n| 556                   | Bagalkot         | 980            | 984        | 970        | 989            | 987        | 994        |\n| 557                   | Bijapur          | 950            | 951        | 950        | 960            | 954        | 981        |\n| 558                   | Bidar            | 949            | 956        | 923        | 956            | 961        | 941        |\n| 559                   | Raichur          | 983            | 992        | 958        | 1,000          | 1,004      | 989        |\n| 560                   | Koppal           | 983            | 985        | 971        | 986            | 983        | 998        |",
+  "chunk_id": "966a994e-0557-58c5-b4cd-0924ea0260b7",
+  "document_id": "census-2011-karnataka-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Karnataka",
+  "region": "Karnataka",
+  "page_number": 30,
+  "section_path": [
+   "**Census of India 2011**",
+   "**Chapter-1**",
+   "Statement 6"
+  ],
+  "chunk_index": 103,
+  "citation_snippet": "| State / District Code | State / District | Sex Ratio 2001 |            |            | Sex Ratio 2011 |            |            |",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+ },
+ "all_persons_title": {
+  "text": "**Census of India 2011** > **Chapter-1** > Statement 6\n\nSex Ratio (number of females per 1000 males) by residence : 2001-2011",
+  "chunk_id": "a8b4ac01-cc79-5824-8229-c98c148bcf16",
+  "document_id": "census-2011-karnataka-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Karnataka",
+  "region": "Karnataka",
+  "page_number": 30,
+  "section_path": [
+   "**Census of India 2011**",
+   "**Chapter-1**",
+   "Statement 6"
+  ],
+  "chunk_index": 102,
+  "citation_snippet": "Sex Ratio (number of females per 1000 males) by residence : 2001-2011",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "755a3c289230f908230242165d26c2be072df44a7426030cb296127ac83dcacd"
+ }
+}

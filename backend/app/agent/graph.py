@@ -23,6 +23,7 @@ from backend.app.agent.evidence import (
     EvidenceBudgetInsufficient,
     bound_assessment_evidence,
     pack_targeted_assessment_evidence,
+    unit_known,
 )
 from backend.app.agent.memory import (
     build_validated_claim_turn,
@@ -63,6 +64,7 @@ from backend.app.execution.hydration import (
     count_table_entity_rows,
     hydrate_artifact_dataset,
     resolved_chart_kind,
+    same_table_evidence,
     validate_trusted_artifact_evidence,
 )
 from backend.app.execution.lineage import (
@@ -804,7 +806,17 @@ class AgentGraph:
                     )
                 )
         deduplicated = {item.chunk_id: item for item in evidence}
-        if deduplicated and state["task_type"] in {"lookup", "comparison"}:
+        # Large tables are chunked into many fragments that repeat one header, and only one of
+        # them holds the state/entity aggregate row. Retrieval can rank the header-only siblings
+        # above it (live: Madhya Pradesh Statement 19 had eight fragments on one page and the
+        # state row was not in the top 20), so named-target artifacts get the same sibling-page
+        # expansion as lookups. Ranking scans already collect the complete table themselves.
+        named_artifact = (
+            state["task_type"] in {"artifact_chart", "artifact_table"}
+            and artifact_requirement is not None
+            and not artifact_requirement.rank_all
+        )
+        if deduplicated and (state["task_type"] in {"lookup", "comparison"} or named_artifact):
             expansion, record = await self._recorded_tool(
                 {**state, "tool_calls": calls},
                 "expand_candidate_pages",
@@ -1091,20 +1103,31 @@ class AgentGraph:
             if evidence_id in by_id and evidence_id in permitted
         ]
         selected = [by_id[evidence_id] for evidence_id in valid_selected_ids]
-        direct = {
-            item.evidence_id
-            for item in assessment.items
-            if item.relevance in {"direct_answer", "compatible_rounding"}
-            and item.evidence_id in by_id
-            and item.entity_match
-            and item.metric_match
-            and item.year_match
-            and item.population_scope_match
-            and item.residence_scope_match
-            and item.has_explicit_value
-            and item.has_unit
-            and item.unit_compatible
-        }
+        # Census tables state units once in the title or column heading ("Sex Ratio (number of
+        # females per 1000 males)") and print bare cells. The assessor inconsistently read that
+        # as a missing unit (live: the same Madhya Pradesh 931 row passed in one run, failed in
+        # another), so a stated unit phrase, or a metric whose Census unit is fixed by definition,
+        # in the chunk's own text satisfies has_unit.
+        unit_backstopped: set[str] = set()
+        direct: set[str] = set()
+        for item in assessment.items:
+            if not (
+                item.relevance in {"direct_answer", "compatible_rounding"}
+                and item.evidence_id in by_id
+                and item.entity_match
+                and item.metric_match
+                and item.year_match
+                and item.population_scope_match
+                and item.residence_scope_match
+                and item.has_explicit_value
+                and item.unit_compatible
+            ):
+                continue
+            if item.has_unit:
+                direct.add(item.evidence_id)
+            elif unit_known(by_id[item.evidence_id].text):
+                direct.add(item.evidence_id)
+                unit_backstopped.add(item.evidence_id)
         if state["task_type"] in {"artifact_chart", "artifact_table"}:
             valid_selected_ids = [item_id for item_id in valid_selected_ids if item_id in direct]
             selected = [by_id[evidence_id] for evidence_id in valid_selected_ids]
@@ -1123,7 +1146,13 @@ class AgentGraph:
             for target in required_targets
         }
         target_complete = not required_targets or all(direct_by_target.values())
-        sufficient = bool(assessment.sufficient and direct and target_complete)
+        # When the only objection was a unit the chunk demonstrably states, the model's overall
+        # verdict inherits that correction; every other per-item and per-target check still holds.
+        model_sufficient = assessment.sufficient or bool(
+            unit_backstopped
+            and not any(item.has_unit for item in assessment.items if item.evidence_id in direct)
+        )
+        sufficient = bool(model_sufficient and direct and target_complete)
         limitations = (
             state.get("available_limitations", [])
             if assessment.coverage_limitation_material and not target_complete
@@ -1466,7 +1495,11 @@ class AgentGraph:
             ) from error
         ranking_winner: SourceRecord | None = None
         if requirement.rank_all:
-            detected_rows = count_table_entity_rows(selected_evidence)
+            detected_rows = count_table_entity_rows(
+                same_table_evidence(
+                    selected_evidence, {record.chunk_id for record in dataset.source_records}
+                )
+            )
             if detected_rows and len(dataset.rows) < detected_rows:
                 raise AgentOperationalError(
                     code="MODEL_OUTPUT_INVALID",
@@ -1864,8 +1897,16 @@ class AgentGraph:
                 if not targets <= cited_regions:
                     codes.append("MISSING_COMPARISON_TARGET")
                 calculations = state.get("calculations", [])
+                # A calculation may cite more chunks than the claims that quote its operands
+                # (live: a second Odisha chunk with the same value); an app-built derived claim
+                # that reproduces the calculation exactly satisfies the invariant.
                 has_derived = any(
                     set(calculation.evidence_ids) <= set(claim.evidence_ids)
+                    or (
+                        claim.derivation is not None
+                        and claim.derivation.operation == calculation.operation
+                        and claim.derivation.operands == calculation.values
+                    )
                     for calculation in calculations
                     for claim in draft.claims
                 )
@@ -1996,6 +2037,10 @@ class AgentGraph:
                     "validate_citations",
                     valid=True,
                     claim_count=len(result.claims),
+                    pruned_citations=[
+                        {"claim_id": claim_id, "evidence_id": evidence_id}
+                        for claim_id, evidence_id in result.pruned_citations
+                    ],
                     citation_count=len(result.citations),
                     error_codes=[],
                     quote_diagnostics=[

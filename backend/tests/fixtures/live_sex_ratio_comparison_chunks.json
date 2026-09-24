@@ -1,0 +1,77 @@
+[
+ {
+  "text": "**Chapter - 1** > **Statement \u2013 6** > **Sex Ratio (number of females per 1000 males) by residence : 2001-2011**\n\n| State/<br>District<br>Code | State/<br>District | Sex Ratio<br>2001 |            |            | Sex Ratio<br>2011 |            |            |\n|----------------------------|--------------------|-------------------|------------|------------|-------------------|------------|------------|\n|                            |                    | Total             | Rural      | Urban      | Total             | Rural      | Urban      |\n| 1                          | 2                  | 3                 | 4          | 5          | 6                 | 7          | 8          |\n| <b>21</b>                  | <b>ODISHA</b>      | <b>972</b>        | <b>987</b> | <b>895</b> | <b>979</b>        | <b>989</b> | <b>932</b> |\n| 370                        | Bargarh            | 976               | 979        | 935        | 977               | 979        | 961        |\n| 371                        | Jharsuguda         | 946               | 975        | 898        | 953               | 977        | 918        |\n| 372                        | Sambalpur          | 969               | 987        | 923        | 976               | 988        | 948        |\n| 373                        | Debagarh           | 980               | 986        | 911        | 975               | 978        | 936        |\n| 374                        | Sundargarh         | 957               | 994        | 889        | 973               | 1,005      | 917        |",
+  "chunk_id": "7be0f079-a4ec-58bd-af08-db39c8bc075f",
+  "document_id": "census-2011-odisha-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Odisha",
+  "region": "Odisha",
+  "page_number": 52,
+  "section_path": [
+   "**Chapter - 1**",
+   "**Statement \u2013 6**",
+   "**Sex Ratio (number of females per 1000 males) by residence : 2001-2011**"
+  ],
+  "chunk_index": 246,
+  "citation_snippet": "| State/<br>District<br>Code | State/<br>District | Sex Ratio<br>2001 |            |            | Sex Ratio<br>2011 |            |            |",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "e381bbd9ecc76b667e5d7882533d33a23f5e31740089603b26c3c33ef1e85081"
+ },
+ {
+  "text": "1 > 9 \u0938\u0947 28 \u092b\u0930\u0935\u0930\u0940 > **Statement 5 : Proportion of rural and urban population : 2001-2011**\n\n| State/<br>District<br>Code | State/<br>District    | Sex Ratio<br>2001 |       |       | Sex Ratio<br>2011 |       |       |\n|----------------------------|-----------------------|-------------------|-------|-------|-------------------|-------|-------|\n|                            |                       | Total             | Rural | Urban | Total             | Rural | Urban |\n| 1                          | 2                     | 3                 | 4     | 5     | 6                 | 7     | 8     |\n| 23                         | MADHYA PRADESH        | 919               | 927   | 898   | 931               | 936   | 918   |\n| 418                        | Sheopur               | 895               | 898   | 877   | 901               | 901   | 903   |\n| 419                        | Morena                | 822               | 817   | 842   | 840               | 834   | 858   |\n| 420                        | Bhind                 | 829               | 825   | 843   | 837               | 828   | 865   |\n| 421                        | Gwalior               | 848               | 833   | 857   | 864               | 852   | 871   |\n| 422                        | Datia                 | 856               | 852   | 870   | 873               | 867   | 892   |\n| 423                        | Shivpuri              | 859               | 855   | 874   | 877               | 874   | 891   |",
+  "chunk_id": "3ba06715-cdf3-5901-b498-4df21a9a386c",
+  "document_id": "census-2011-madhya-pradesh-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Madhya Pradesh",
+  "region": "Madhya Pradesh",
+  "page_number": 33,
+  "section_path": [
+   "1",
+   "9 \u0938\u0947 28 \u092b\u0930\u0935\u0930\u0940",
+   "**Statement 5 : Proportion of rural and urban population : 2001-2011**"
+  ],
+  "chunk_index": 153,
+  "citation_snippet": "| State/<br>District<br>Code | State/<br>District    | Sex Ratio<br>2001 |       |       | Sex Ratio<br>2011 |       |       |",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "e6ef5f798b5aa8548555163b486329a1cc6bad869a4dbe0b9d145a667b1a7573"
+ },
+ {
+  "text": "CENSUS OF INDIA 2011 > **6. SEX RATIO (NUMBER OF FEMALES PER 1,000 MALES)**\n\nThe Sex Ratio in the country which was at 933 in 2001 has increased by 10 points to 943 in 2011. In rural areas the sex ratio has increased from 946 to 949. The corresponding increase in urban areas has been of 29 points from 900 to 929. In Census 2011, Kerala has recorded the highest sex ratio with respect to total (1084), rural (1078) and urban population (1091) respectively. The lowest sex ratio in rural areas has been recorded in Chandigarh (690) and the corresponding value in urban areas has been returned in Daman & Diu (551).\n\nThe sex ratio in Madhya Pradesh which was 919 in 2001 has increased by 12 points to 931 in 2011. In rural areas the sex ratio has increased from 927 to 936, an increase of 9 points. The corresponding increase in urban areas has been 20 points from 898 to 918. Balaghat has recorded the highest sex ratio in respect to total (1021), rural (1024) and urban population (1000) respectively. In 2001 Census also, Balaghat had recorded the highest sex ratio in respect to total (1022), rural (1030) and urban population (970) respectively. The lowest sex ratio in rural areas has been recorded in Bhind (828). The corresponding value in urban areas has been returned from Morena (858).",
+  "chunk_id": "548fcc7d-2abc-5d2f-9c84-7c303c005ae8",
+  "document_id": "census-2011-madhya-pradesh-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Madhya Pradesh",
+  "region": "Madhya Pradesh",
+  "page_number": 9,
+  "section_path": [
+   "CENSUS OF INDIA 2011",
+   "**6. SEX RATIO (NUMBER OF FEMALES PER 1,000 MALES)**"
+  ],
+  "chunk_index": 28,
+  "citation_snippet": "The Sex Ratio in the country which was at 933 in 2001 has increased by 10 points to 943 in 2011. In rural areas the sex ratio has increased from 946 to 949. The corresponding increase in urban areas has been of 29 points from 900 to 929. In",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "e6ef5f798b5aa8548555163b486329a1cc6bad869a4dbe0b9d145a667b1a7573"
+ },
+ {
+  "text": "**Chapter - 1** > **Statement \u2013 6** > **Sex Ratio (number of females per 1000 males) by residence : 2001-2011**\n\n| State/<br>District<br>Code | State/<br>District | Sex Ratio<br>2001 |            |            | Sex Ratio<br>2011 |            |            |\n|----------------------------|--------------------|-------------------|------------|------------|-------------------|------------|------------|\n|                            |                    | Total             | Rural      | Urban      | Total             | Rural      | Urban      |\n| 1                          | 2                  | 3                 | 4          | 5          | 6                 | 7          | 8          |\n| <b>21</b>                  | <b>ODISHA</b>      | <b>972</b>        | <b>987</b> | <b>895</b> | <b>979</b>        | <b>989</b> | <b>932</b> |\n| 370                        | Bargarh            | 976               | 979        | 935        | 977               | 979        | 961        |\n| 371                        | Jharsuguda         | 946               | 975        | 898        | 953               | 977        | 918        |\n| 372                        | Sambalpur          | 969               | 987        | 923        | 976               | 988        | 948        |\n| 373                        | Debagarh           | 980               | 986        | 911        | 975               | 978        | 936        |\n| 374                        | Sundargarh         | 957               | 994        | 889        | 973               | 1,005      | 917        |",
+  "chunk_id": "a09186ef-00dd-55a5-ba67-a569bb9dae55",
+  "document_id": "census-2011-odisha-pca-highlights",
+  "document_title": "Primary Census Abstract Data Highlights: Odisha",
+  "region": "Odisha",
+  "page_number": 25,
+  "section_path": [
+   "**Chapter - 1**",
+   "**Statement \u2013 6**",
+   "**Sex Ratio (number of females per 1000 males) by residence : 2001-2011**"
+  ],
+  "chunk_index": 102,
+  "citation_snippet": "| State/<br>District<br>Code | State/<br>District | Sex Ratio<br>2001 |            |            | Sex Ratio<br>2011 |            |            |",
+  "citation_limitation": null,
+  "extraction_method": "provided_markdown",
+  "coverage_status": "indexed_provided_markdown",
+  "source_checksum": "e381bbd9ecc76b667e5d7882533d33a23f5e31740089603b26c3c33ef1e85081"
+ }
+]

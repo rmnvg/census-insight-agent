@@ -31,6 +31,50 @@ def _words(value: str) -> set[str]:
     return set(_WORD.findall(value.casefold()))
 
 
+def _table_title(payload: dict[str, Any]) -> str | None:
+    """The one-line statement title a heading-only chunk carries, if this chunk is one.
+
+    Census Markdown writes "### Statement 17" followed by a plain title paragraph ("Sex Ratio
+    ... among Scheduled Tribes by residence"). The chunker keeps that paragraph as its own chunk,
+    so every table fragment's breadcrumb says only "Statement 17".
+    """
+    text = str(payload.get("text", ""))
+    if "|" in text:
+        return None
+    section = " > ".join(str(value) for value in payload.get("section_path", []))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines and section and lines[0] == section:
+        lines = lines[1:]
+    if len(lines) != 1:
+        return None
+    title = lines[0].strip("*# ").strip()
+    if not 12 <= len(title) <= 220 or title.endswith("."):
+        return None
+    return title
+
+
+def _title_index(payloads: list[dict[str, Any]]) -> dict[tuple[str, ...], str]:
+    candidates: dict[tuple[str, ...], set[str]] = {}
+    for payload in payloads:
+        title = _table_title(payload)
+        if title:
+            key = tuple(str(value) for value in payload.get("section_path", []))
+            candidates.setdefault(key, set()).add(title)
+    return {key: next(iter(titles)) for key, titles in candidates.items() if len(titles) == 1}
+
+
+def with_table_title(
+    item: RetrievedEvidence, titles: dict[tuple[str, ...], str]
+) -> RetrievedEvidence:
+    """Append a table fragment's statement title to its section path (text is untouched)."""
+    if "|" not in item.text:
+        return item
+    title = titles.get(tuple(item.section_path))
+    if not title or title in item.section_path:
+        return item
+    return item.model_copy(update={"section_path": [*item.section_path, title]})
+
+
 class SearchDocumentsInput(BaseModel):
     query: str = Field(min_length=1)
     document_ids: list[str] | None = None
@@ -64,9 +108,10 @@ class AgentTools:
         self.skills = skills
         self.data_root = data_root
         self.timeout_seconds = timeout_seconds
+        self._titles: dict[tuple[str, str], dict[tuple[str, ...], str]] = {}
 
     async def search_documents(self, value: SearchDocumentsInput) -> list[RetrievedEvidence]:
-        return await asyncio.wait_for(
+        results = await asyncio.wait_for(
             asyncio.to_thread(
                 self.retrieval.search,
                 value.query,
@@ -76,6 +121,26 @@ class AgentTools:
             ),
             timeout=self.timeout_seconds,
         )
+        return await self.with_table_titles(results)
+
+    async def with_table_titles(self, evidence: list[RetrievedEvidence]) -> list[RetrievedEvidence]:
+        """Attach each table fragment's statement title (cached per document version)."""
+        enriched: list[RetrievedEvidence] = []
+        for item in evidence:
+            key = (item.document_id, item.source_checksum)
+            if key not in self._titles:
+                records = await self._scroll_all(
+                    models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="document_id", match=models.MatchValue(value=item.document_id)
+                            )
+                        ]
+                    )
+                )
+                self._titles[key] = _title_index([record.payload or {} for record in records])
+            enriched.append(with_table_title(item, self._titles[key]))
+        return enriched
 
     async def get_evidence_by_ids(
         self,
@@ -202,7 +267,8 @@ class AgentTools:
             )
             if len(selected) >= max_sections:
                 break
-        return selected
+        titles = _title_index([record.payload or {} for record in records])
+        return [with_table_title(item, titles) for item in selected]
 
     async def collect_metric_table_rows(
         self, document_id: str, metric: str
@@ -224,10 +290,12 @@ class AgentTools:
             )
         )
         disqualifying_modifiers = _RANKING_QUALIFIER_WORDS - metric_words
+        titles = _title_index([record.payload or {} for record in records])
         matched: list[RetrievedEvidence] = []
         for record in records:
             payload = record.payload or {}
-            section = " ".join(str(value) for value in payload.get("section_path", []))
+            path = [str(value) for value in payload.get("section_path", [])]
+            section = " ".join([*path, titles.get(tuple(path), "")])
             context = f"{section} {str(payload.get('text', ''))[:400]}"
             context_words = _words(context)
             if not metric_words or not metric_words <= context_words:
@@ -237,7 +305,11 @@ class AgentTools:
                 # Ratio" or "Sex Ratio among Scheduled Castes/Tribes" statement tables, which
                 # otherwise match on the "sex ratio" word subset alone.
                 continue
-            matched.append(RetrievedEvidence.model_validate({**payload, "retrieval_score": 0.0}))
+            matched.append(
+                with_table_title(
+                    RetrievedEvidence.model_validate({**payload, "retrieval_score": 0.0}), titles
+                )
+            )
         return sorted(matched, key=lambda item: item.page_number)
 
     async def expand_candidate_pages(
@@ -268,7 +340,7 @@ class AgentTools:
                 RetrievedEvidence.model_validate({**(record.payload or {}), "retrieval_score": 0.0})
                 for record in records
             )
-        return expanded
+        return await self.with_table_titles(expanded)
 
     async def get_document_coverage(
         self, document_id: str

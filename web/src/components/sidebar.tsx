@@ -8,6 +8,7 @@ import {
   MoreHorizontal,
   Pencil,
   Search,
+  ShieldCheck,
   SquarePen,
   Sun,
   Trash2,
@@ -119,6 +120,13 @@ export function Sidebar({ activeId, onNewChat, onOpenLibrary }: Props) {
             {documents.length}
           </span>
         </button>
+        <Link
+          href="/trust"
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
+        >
+          <ShieldCheck className="size-4" />
+          Trust scorecard
+        </Link>
         <div className="flex items-center justify-between px-3 pt-1">
           <ServiceHealth />
           <ThemeToggle />

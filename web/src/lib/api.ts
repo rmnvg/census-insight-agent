@@ -3,6 +3,10 @@ import type {
   ApiError,
   ChatResponse,
   CoverageSummary,
+  ResearchPlanEvent,
+  ResearchReport,
+  ResearchSection,
+  Scorecard,
   DocumentSummary,
   RunTrace,
   SessionRecord,
@@ -65,6 +69,7 @@ export const api = {
   deleteSession: (id: string) => request<void>(`sessions/${id}`, { method: "DELETE" }),
   trace: (runId: string) => request<RunTrace>(`runs/${runId}/trace`),
   documents: () => request<DocumentSummary[]>("documents"),
+  scorecard: () => request<Scorecard>("evaluation/scorecard"),
   coverage: (id: string) => request<CoverageSummary>(`documents/${encodeURIComponent(id)}/coverage`),
   uploads: () => request<UploadJob[]>("documents/uploads"),
   upload: (id: string) => request<UploadJob>(`documents/uploads/${id}`),
@@ -135,6 +140,57 @@ export async function streamChat(
     {
       error_code: "STREAM_INTERRUPTED",
       message: "The connection closed before the answer arrived. It will appear in this chat once it finishes.",
+      retryable: true,
+    },
+    0,
+  );
+}
+
+export type ResearchHandlers = {
+  onPlan: (plan: ResearchPlanEvent) => void;
+  onSectionStarted: (index: number) => void;
+  onProgress: (index: number, node: string, label: string) => void;
+  onSectionDone: (index: number, section: ResearchSection) => void;
+};
+
+/** POST /research/stream: a planned brief whose every section is a validated agent turn. */
+export async function streamResearch(
+  sessionId: string,
+  topic: string,
+  handlers: ResearchHandlers,
+): Promise<ResearchReport> {
+  let response: Response;
+  try {
+    response = await fetch("/api/research/stream", {
+      method: "POST",
+      ...json({ session_id: sessionId, topic }),
+    });
+  } catch {
+    throw new ApiRequestError(
+      { error_code: "NETWORK_ERROR", message: "Could not reach the Census service.", retryable: true },
+      0,
+    );
+  }
+  if (!response.ok || !response.body) throw await toError(response);
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  const parser = new SseParser();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    for (const event of parser.push(value)) {
+      const data = JSON.parse(event.data);
+      if (event.event === "plan") handlers.onPlan(data as ResearchPlanEvent);
+      else if (event.event === "section_started") handlers.onSectionStarted(data.index);
+      else if (event.event === "progress") handlers.onProgress(data.index, data.node, data.label);
+      else if (event.event === "section_done") handlers.onSectionDone(data.index, data.section as ResearchSection);
+      else if (event.event === "result") return data as ResearchReport;
+      else if (event.event === "error") throw new ApiRequestError(data as ApiError, 200);
+    }
+  }
+  throw new ApiRequestError(
+    {
+      error_code: "STREAM_INTERRUPTED",
+      message: "The connection closed before the brief finished. It will appear in this chat once it completes.",
       retryable: true,
     },
     0,

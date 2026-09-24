@@ -123,6 +123,61 @@ never text), so an uploaded region is in scope under its exact name. Before this
 the corpus only as "Indian Census reports" and asked for clarification about an uploaded region it
 did not recognise.
 
+## Deep research
+
+`POST /research/stream` turns a topic into a short brief without weakening any guarantee.
+
+1. **Plan.** One planner call (`GeminiAgentModel.plan_research`) returns headings and 3–5
+   questions. It sees the live document catalog and is limited to shapes the agent answers
+   reliably: whole-population lookups, two-region comparisons, sex-ratio district rankings, and
+   bar charts. Out-of-scope topics return `in_scope=false` with a reason and no sections.
+2. **Answer.** Each question runs through the unchanged agent graph in its own hidden child
+   session (`app_sessions.parent_session_id`), at most three at a time. Separate sessions stop
+   one section's validated memory from resolving another's references.
+3. **Assemble.** The brief is the sections' validated responses. Planner text contributes only
+   headings and questions, never facts. A declined or failed section is shown as such; nothing
+   is backfilled.
+
+The whole brief holds the parent chat's session lock, streams `plan`, `section_started`,
+`progress`, `section_done`, and `result` events, and is saved to the transcript as one report
+entry. Deleting the chat deletes its child sessions, checkpoints, traces, and artifacts. The UI
+exports the brief as Markdown or a print-ready page with one global, deduplicated reference list.
+
+## Trust scorecard
+
+`evals/trust_benchmark.json` holds questions whose answers were verified by hand against the
+source tables, including traps (the Scheduled Tribes and Scheduled Castes tables, a 2021 census
+that does not exist). `scripts/trust_benchmark.py --allow-paid-calls` asks each one through the
+live API and scores it with `backend/app/trust.py`. The scorer is deliberately independent of
+the agent's own validation code, so it audits the agent rather than trusting it:
+
+- every expected value, district, and artifact type must be present;
+- every numeric claim must appear verbatim in one of its own cited quotes;
+- every derived value must recompute from its operands;
+- a question outside the corpus must be refused with no numbers.
+
+Transient provider errors get one retry, and the attempt count is reported. `GET
+/evaluation/scorecard` serves the latest local run, else the copy shipped in `evals/`, and the
+UI renders it at `/trust` with a one-click live re-ask per case.
+
+## Statement titles and population subgroups
+
+Census Markdown writes `### Statement 17` followed by a plain title paragraph ("Sex Ratio …
+among Scheduled Tribes by residence"). Breadcrumbs come from headings, so every fragment of such
+a table was labelled only "Statement 17". A Scheduled Tribes cell (Karnataka, 990) could then
+support "the sex ratio of Karnataka was 990" with a valid-looking citation; the state figure is
+973. The title paragraph is indexed as its own chunk with the identical breadcrumb, so
+`AgentTools` re-attaches it to each table fragment's `section_path` at runtime; text and
+offsets are untouched, and no re-ingestion is needed. Deterministic guards then use the title:
+
+- **Citations:** a whole-population claim cannot cite a Scheduled Caste, Scheduled Tribe, or
+  child table.
+- **Hydration:** refuses such cells.
+- **Ranking scans:** exclude such tables.
+
+The prompts also show the title as `SECTION=`. Folding titles into breadcrumbs at ingestion is
+the durable fix but re-embeds the corpus, so it is left for an explicit decision.
+
 ## Streamlit UI boundary (optional, `--profile streamlit`)
 
 Streamlit provides a compact evaluator-facing chat and artifact interface while FastAPI remains the

@@ -10,7 +10,7 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-agent%20orchestration-1C3C3C)
 ![Qdrant](https://img.shields.io/badge/Qdrant-hybrid%20RRF-DC244C?logo=qdrant&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/docker%20compose-4%20services-2496ED?logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-400%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-444%20passing-brightgreen)
 
 Ask it about literacy rates, population, sex ratios, and district rankings across Karnataka, Odisha,
 and Madhya Pradesh — or upload your own report. It looks things up, summarizes, compares, ranks,
@@ -47,17 +47,24 @@ click.**
 
 | | |
 |---|---|
-| ![Click a citation to open the original PDF page](docs/screenshots/03-pdf-page-viewer.png) | ![Live progress while the agent works](docs/screenshots/07-live-progress.png) |
-| **Citation → original PDF page.** Every citation chip opens the physical page of the source PDF next to the quoted evidence. | **Live progress.** Server-sent events show each LangGraph step as it starts: retrieval, evidence assessment, citation validation. |
-| ![Chart artifact with data and provenance downloads](docs/screenshots/05-chart-artifact.png) | ![Upload your own PDF](docs/screenshots/06-document-library.png) |
-| **Verified artifacts.** Charts and tables come from the network-isolated executor, with the plotted data and a provenance manifest one click away. | **Bring your own PDF.** Uploads go through the same citation-safe ingestion pipeline as the bundled reports, as a background job with live status. |
+| ![Deep research brief with verified sections](docs/screenshots/11-research-brief.png) | ![Trust scorecard](docs/screenshots/15-trust-scorecard.png) |
+| **Deep research.** The agent plans 3–5 questions, runs each through the full citation checks in parallel, and assembles a brief you can export as Markdown or PDF. Declined sections stay declined. | **Trust scorecard.** A live benchmark with hand-verified answers and trap questions, audited independently of the agent's own validation: correct answers, correct refusals, and numbers that don't appear in their own citation. |
+| ![Interactive chart where each bar links to its source page](docs/screenshots/13-interactive-chart.png) | ![Citation opens the original PDF page](docs/screenshots/03-pdf-page-viewer.png) |
+| **Charts you can audit.** Each bar is a verified source cell: hover for its page, click to open the original PDF. Rankings highlight the winner computed in code. | **Citation → original PDF page.** Every citation chip opens the physical page of the source PDF next to the quoted evidence. |
+| ![Live progress while the agent works](docs/screenshots/16-research-live.png) | ![Upload your own PDF](docs/screenshots/06-document-library.png) |
+| **Live progress.** Server-sent events show each LangGraph step as it starts; a research brief shows every section working in parallel. | **Bring your own PDF.** Uploads go through the same citation-safe pipeline as the bundled reports, as a background job with live status. |
+
+More: [district ranking with the winner highlighted](docs/screenshots/14-ranking-chart.png) ·
+[finished research brief](docs/screenshots/17-research-done.png) ·
+[dark mode](docs/screenshots/09-dark-mode.png) · [mobile](docs/screenshots/10-mobile.png) ·
+[empty state](docs/screenshots/01-empty-state.png)
 
 - **Claude-style sessions:** a searchable, date-grouped chat history, rename and delete, and
-  shareable URLs (`/c/<session_id>`). Switch chats while one is still answering; progress continues
-  in the background.
+  shareable URLs (`/c/<session_id>`). Switch chats while one is still answering.
 - **Answers that show their work:** numbered citation chips on every claim, arithmetic shown as
-  *computed in code*, a clear badge when the agent declines instead of guessing, and a per-answer
-  execution trace.
+  *computed in code*, a clear badge when the agent declines instead of guessing, a per-answer
+  execution trace, and one-click follow-ups ("How does that compare with Odisha?") that exercise
+  the validated conversation memory.
 - **Hardened by default:** the browser reaches FastAPI only through an allowlisted same-origin proxy;
   the container is read-only, non-root, and has no credentials.
 - Dark mode, mobile layout, keyboard shortcuts (<kbd>⇧⌘O</kbd> new chat), and live service health.
@@ -68,6 +75,7 @@ click.**
 
 - [Demo video](#demo-video)
 - [The interface](#the-interface)
+- [Measured trust](#measured-trust)
 - [What makes this different](#what-makes-this-different)
 - [Architecture](#architecture)
 - [How a request actually flows](#how-a-request-actually-flows)
@@ -84,6 +92,29 @@ click.**
 - [Further reading](#further-reading)
 
 ---
+
+## Measured trust
+
+A benchmark of 18 questions with answers verified by hand against the source tables, run live
+through the API and scored independently of the agent's own validation code
+([`backend/app/trust.py`](backend/app/trust.py), cases in
+[`evals/trust_benchmark.json`](evals/trust_benchmark.json)):
+
+| Check | Result |
+|---|---|
+| Correct answers (lookups, comparisons, district rankings, charts) | **14 / 14** |
+| Correct refusals (GDP, unemployment, cricket, a 2021 census that doesn't exist) | **4 / 4** |
+| Numbers that don't appear in their own cited quote | **0** of 132 claims checked |
+| Derived values that don't recompute | **0** |
+| Wrong answers shown | **0** |
+| Median latency per question | 26 s |
+
+The cases include deliberate traps. The Scheduled Tribes (990) and Scheduled Castes (987) tables
+sit next to the real state figures (973, 979), and a trap passes only if the agent never presents
+the subgroup value as the state's. This is one live run on 2026-09-24 with `gemini-2.5-flash`; model
+outputs vary between runs. Reproduce it with `make trust-benchmark` (billable), and see it in the
+app at `/trust`. Known gaps, such as district rankings by literacy rate, are in
+[FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md).
 
 ## What makes this different
 
@@ -220,6 +251,7 @@ the chain stops and the system says so instead of silently continuing.
 | "Which source pages support those values?" | `source_support` | Rehydrates prior validated claims against **current** Qdrant state — never trusts conversation prose |
 | "What was France's unemployment rate in 2011?" | `out_of_scope` | Refuses cleanly — no hallucinated cross-corpus answer |
 | *Upload a PDF, then ask about it* | any of the above | Indexed through the same page-bounded, checksum-bound pipeline; the agent sees the live document catalog |
+| *Deep research:* "Gender balance and literacy across Karnataka and Odisha" | research brief | A planner writes 3–5 questions; each runs as a separate validated agent turn; the brief contains only validated claims |
 
 ## Quick start
 
@@ -350,7 +382,7 @@ sandbox such as microVM isolation.
 ## Verification and evaluation
 
 A [GitHub Actions workflow](.github/workflows/ci.yml) runs the full offline gate — format, lint,
-type check, all 360 Python tests, an offline UI smoke test, a Compose trust-boundary audit, a
+type check, all 390 Python tests, an offline UI smoke test, a Compose trust-boundary audit, a
 git-history secret scan, and a build (never a run) of each service's Docker image — on every push,
 with no billable calls. Badge at the top of this file reflects the current `main` branch.
 
@@ -425,6 +457,8 @@ trace view shows allowlisted operational fields only. Files under `workspace/` a
 | `PATCH /sessions/{id}` · `DELETE /sessions/{id}` | Rename; delete transcript, checkpoints, traces, and artifacts |
 | `POST /documents/upload` · `GET /documents/uploads/{job_id}` | Upload a PDF (202 + background job) and poll it |
 | `DELETE /documents/{id}` | Remove an uploaded document and its vectors (bundled corpus is protected) |
+| `POST /research/stream` | Deep research: `plan`, per-section `progress`/`section_done`, then the saved report |
+| `GET /evaluation/scorecard` | Latest trust benchmark run (local, else the copy in `evals/`) |
 | `GET /documents/{id}/pages/{n}?highlight=…` | Render a physical PDF page, highlighting the quote where the PDF has a text layer |
 
 ## Troubleshooting

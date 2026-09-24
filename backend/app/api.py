@@ -48,6 +48,7 @@ from backend.app.retrieval.models import (
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
 from backend.app.retrieval.sparse import BM25SparseEncoder
+from backend.app.trust import Scorecard
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,22 @@ async def download_artifact_file(session_id: str, artifact_id: str, filename: st
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
+@router.get("/evaluation/scorecard", response_model=Scorecard, tags=["evaluation"])
+def trust_scorecard() -> Scorecard:
+    """The latest trust benchmark run: a locally generated one, else the one shipped in evals/."""
+    candidates = [
+        get_settings().data_root / "processed" / "trust-scorecard.json",
+        Path("evals") / "trust-scorecard.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            try:
+                return Scorecard.model_validate_json(path.read_text(encoding="utf-8"))
+            except ValueError as error:
+                raise HTTPException(status_code=503, detail="Scorecard is unreadable") from error
+    raise HTTPException(status_code=404, detail="No trust scorecard has been generated yet")
+
+
 @router.get("/health/executor", response_model=ExecutorHealth, tags=["health"])
 def executor_health() -> ExecutorHealth:
     age = get_agent_service().execution_queue.heartbeat_age_seconds()
@@ -457,23 +474,104 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
     _background_turns.add(task)
     task.add_done_callback(_background_turns.discard)
 
-    async def events() -> AsyncIterator[str]:
-        yield _sse("started", {"session_id": request.session_id})
-        while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
-            except TimeoutError:
-                yield ": keepalive\n\n"
-                continue
-            if item is None:
-                return
-            yield item
-
     return StreamingResponse(
-        events(),
+        _drain(queue, {"session_id": request.session_id}),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class ResearchRequest(BaseModel):
+    session_id: str
+    topic: str = Field(min_length=3, max_length=500)
+
+
+@router.post(
+    "/research/stream",
+    tags=["agent"],
+    responses={
+        200: {
+            "description": (
+                "Server-sent events: `plan`, then per section `section_started`, `progress` "
+                "({index, node, label}) and `section_done`, then one `result` (ResearchReport) "
+                "or `error`."
+            ),
+            "content": {"text/event-stream": {}},
+        }
+    },
+)
+async def research_stream(request: ResearchRequest) -> StreamingResponse:
+    """Deep research: plan questions, answer each with a validated agent turn, stream it all."""
+    service = get_agent_service()
+    try:
+        if await service.get_session(request.session_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown session")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def emit(event: str, data: dict[str, object]) -> None:
+        if event == "progress":
+            node = str(data["node"])
+            data = {**data, "label": PROGRESS_LABELS.get(node, node)}
+        queue.put_nowait(_sse(event, data))
+
+    async def run() -> None:
+        try:
+            report = await service.research(request.session_id, request.topic, emit=emit)
+            queue.put_nowait(_sse("result", report.model_dump(mode="json", by_alias=True)))
+        except AgentChatError as error:
+            queue.put_nowait(
+                _sse(
+                    "error",
+                    {
+                        "error_code": error.error.code,
+                        "message": error.error.message,
+                        "retryable": error.error.retryable,
+                    },
+                )
+            )
+        except ValueError as error:
+            queue.put_nowait(
+                _sse("error", {"error_code": "INVALID_REQUEST", "message": str(error)})
+            )
+        except Exception:
+            logger.exception("Research run failed")
+            queue.put_nowait(
+                _sse(
+                    "error",
+                    {
+                        "error_code": "INTERNAL_ERROR",
+                        "message": "The research brief could not be completed. Please retry.",
+                        "retryable": True,
+                    },
+                )
+            )
+        finally:
+            queue.put_nowait(None)
+
+    task = asyncio.create_task(run())
+    _background_turns.add(task)
+    task.add_done_callback(_background_turns.discard)
+    return StreamingResponse(
+        _drain(queue, {"session_id": request.session_id}),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _drain(queue: asyncio.Queue[str | None], started: dict[str, Any]) -> AsyncIterator[str]:
+    yield _sse("started", started)
+    while True:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+        except TimeoutError:
+            yield ": keepalive\n\n"
+            continue
+        if item is None:
+            return
+        yield item
 
 
 @router.get(

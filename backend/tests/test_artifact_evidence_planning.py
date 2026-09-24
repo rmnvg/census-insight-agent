@@ -219,7 +219,8 @@ def test_comparison_artifact_searches_targets_independently_with_filters(tmp_pat
         "2011 total persons literacy rate Karnataka",
         "2011 total persons literacy rate Odisha",
     ]
-    assert len(result["tool_calls"]) == 6
+    names = [call.tool_name for call in result["tool_calls"]]
+    assert len(names) == 7 and "expand_candidate_pages" in names
     assert tools.qdrant_writes == 0
 
 
@@ -323,3 +324,73 @@ def test_artifact_dataset_retains_complete_target_provenance() -> None:
     )
     validate_dataset(dataset, direct, requirement())
     assert {record.region for record in dataset.source_records} == {"Karnataka", "Odisha"}
+
+
+# Shape of the live failure (Madhya Pradesh, Statement 19, physical page 65): one table chunked into
+# fragments that all repeat the header; only a sibling that retrieval did not return holds the
+# state row. Page expansion must bring it in and packing must reserve it for the target.
+_HEADER = (
+    "| State/<br>District<br>Code | State/<br>District | Literates | | | Literacy Rate |\n"
+    "|---|---|---|---|---|---|\n| | | 2011 | | | 2011 |\n"
+)
+
+
+def _fragment(chunk_id: str, rows: str, score: float) -> RetrievedEvidence:
+    return candidate("Madhya Pradesh", 65, chunk_id, "direct", score).model_copy(
+        update={"text": _HEADER + rows, "citation_snippet": rows.strip()}
+    )
+
+
+class SplitTableTools(RecordingTools):
+    state_row = _fragment("mp-state-row", "| 23 | MADHYA PRADESH | 42,851,169 | | | 69.3 |", 0.0)
+
+    async def search_documents(self, value: Any) -> list[RetrievedEvidence]:
+        self.requests.append(value)
+        return [
+            _fragment(f"mp-districts-{index}", f"| 4{index} | Sheopur | 328,025 | | | 57.4 |", 1.0)
+            for index in range(3)
+        ]
+
+    async def expand_candidate_pages(
+        self, candidates: list[RetrievedEvidence], *, max_pages_per_document: int = 3
+    ) -> list[RetrievedEvidence]:
+        del max_pages_per_document
+        return [*candidates, self.state_row]
+
+
+def _single_target_state(rank_all: bool = False) -> dict[str, Any]:
+    value = requirement().model_copy(
+        update={"regions": ["Madhya Pradesh"], "comparison": True, "rank_all": rank_all}
+    )
+    return {
+        "resolved_query": "2011 literacy rate Madhya Pradesh",
+        "task_type": "artifact_chart",
+        "classification": TaskClassification(
+            task_type="artifact_chart",
+            regions=["Madhya Pradesh"],
+            artifact_requirement=value,
+            reason="Chart",
+        ),
+        "artifact_requirement": value,
+        "plan": AgentPlan(steps=["retrieve"], retrieval_top_k=20),
+        "tool_calls": [],
+        "trace_events": [],
+        "errors": [],
+    }
+
+
+def test_named_artifact_expands_pages_so_split_table_state_row_is_reserved(
+    tmp_path: Path,
+) -> None:
+    tools = SplitTableTools(SkillRegistry(tmp_path / "skills"))
+    graph = AgentGraph(AssessBothModel(), tools)  # type: ignore[arg-type]
+    result = run(graph.call_tools(_single_target_state()))  # type: ignore[arg-type]
+    ids = [item.chunk_id for item in result["retrieved_evidence"]]
+    assert "mp-state-row" in ids
+    packed = pack_targeted_assessment_evidence(
+        result["retrieved_evidence"],
+        required_targets=["Madhya Pradesh"],
+        max_characters=12_000,
+        max_chunks=12,
+    )
+    assert packed.reserved_by_target == {"Madhya Pradesh": "mp-state-row"}

@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   ShieldX,
   Table2,
+  Telescope,
   Trophy,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -19,8 +20,13 @@ import { AssistantMessage, ErrorMessage } from "./assistant-message";
 import { useChat } from "./chat-provider";
 import { LogoMark } from "./logo";
 import { ProgressCard } from "./progress-card";
+import { ResearchProgress, ResearchReportCard } from "./research";
 
 const MAX_MESSAGE = 4000;
+
+type Mode = "chat" | "research";
+
+const RESEARCH_SUGGESTION = "Gender balance and literacy across Karnataka and Odisha";
 
 const SUGGESTIONS = [
   { icon: FileSearch, label: "Lookup", prompt: "What was the literacy rate of Karnataka in 2011?" },
@@ -41,6 +47,7 @@ export function ChatView({ sessionId, onOpenLibrary }: Props) {
   const { threads, loadThread, send, documents, sessions } = useChat();
   const thread = sessionId ? threads[sessionId] : undefined;
   const [draft, setDraft] = useState("");
+  const [mode, setMode] = useState<Mode>("chat");
   const scrollRef = useRef<HTMLDivElement>(null);
   const messages = thread?.messages ?? [];
   const pending = thread?.pending ?? null;
@@ -68,14 +75,15 @@ export function ChatView({ sessionId, onOpenLibrary }: Props) {
     if (element) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
   }, [messages.length, stepCount]);
 
-  const submit = async (text: string) => {
+  const submit = async (text: string, submitMode: Mode = mode) => {
     const value = text.trim();
     if (!value || pending) return;
     setDraft("");
-    await send(sessionId, value);
+    setMode("chat");
+    await send(sessionId, value, submitMode);
   };
 
-  const lastUserPrompt = [...messages].reverse().find((entry) => entry.role === "user")?.content;
+  const lastUser = [...messages].reverse().find((entry) => entry.role === "user");
   const empty = !messages.length && !pending && thread?.status !== "loading";
 
   if (thread?.status === "missing") {
@@ -105,7 +113,12 @@ export function ChatView({ sessionId, onOpenLibrary }: Props) {
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {empty ? (
-          <EmptyState documents={documents.map((doc) => doc.region)} onPick={submit} onOpenLibrary={onOpenLibrary} />
+          <EmptyState
+            documents={documents.map((doc) => doc.region)}
+            onPick={(prompt) => submit(prompt, "chat")}
+            onResearch={() => submit(RESEARCH_SUGGESTION, "research")}
+            onOpenLibrary={onOpenLibrary}
+          />
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-8 px-4 py-8 md:px-6">
             {thread?.status === "loading" && <ThreadSkeleton />}
@@ -113,17 +126,19 @@ export function ChatView({ sessionId, onOpenLibrary }: Props) {
               <Entry
                 key={entry.message_id}
                 entry={entry}
+                onFollowUp={index === messages.length - 1 && !pending ? (prompt) => submit(prompt, "chat") : undefined}
+                libraryRegions={documents.map((doc) => doc.region)}
                 onRetry={
-                  entry.error?.retryable && index === messages.length - 1 && lastUserPrompt
-                    ? () => submit(lastUserPrompt)
+                  entry.error?.retryable && index === messages.length - 1 && lastUser?.content
+                    ? () => submit(lastUser.content ?? "", lastUser.mode ?? "chat")
                     : undefined
                 }
               />
             ))}
             {pending && (
               <>
-                <UserBubble text={pending.text} />
-                <ProgressCard pending={pending} />
+                <UserBubble text={pending.text} research={pending.mode === "research"} />
+                {pending.mode === "research" ? <ResearchProgress pending={pending} /> : <ProgressCard pending={pending} />}
               </>
             )}
             {awaiting && <ProgressCard pending={null} />}
@@ -136,21 +151,41 @@ export function ChatView({ sessionId, onOpenLibrary }: Props) {
         onChange={setDraft}
         onSubmit={() => submit(draft)}
         disabled={Boolean(pending) || awaiting}
+        mode={mode}
+        onModeChange={setMode}
       />
     </div>
   );
 }
 
-function Entry({ entry, onRetry }: { entry: TranscriptEntry; onRetry?: () => void }) {
-  if (entry.role === "user") return <UserBubble text={entry.content ?? ""} />;
-  if (entry.response) return <AssistantMessage response={entry.response} />;
+function Entry({
+  entry,
+  onRetry,
+  onFollowUp,
+  libraryRegions,
+}: {
+  entry: TranscriptEntry;
+  onRetry?: () => void;
+  onFollowUp?: (prompt: string) => void;
+  libraryRegions: string[];
+}) {
+  if (entry.role === "user") return <UserBubble text={entry.content ?? ""} research={entry.mode === "research"} />;
+  if (entry.report) return <ResearchReportCard report={entry.report} />;
+  if (entry.response) {
+    return <AssistantMessage response={entry.response} onFollowUp={onFollowUp} libraryRegions={libraryRegions} />;
+  }
   if (entry.error) return <ErrorMessage error={entry.error} onRetry={onRetry} />;
   return null;
 }
 
-function UserBubble({ text }: { text: string }) {
+function UserBubble({ text, research = false }: { text: string; research?: boolean }) {
   return (
-    <div className="flex justify-end">
+    <div className="flex flex-col items-end gap-1">
+      {research && (
+        <span className="flex items-center gap-1 text-[11px] font-medium text-teal-700 dark:text-teal-400">
+          <Telescope className="size-3" /> Deep research
+        </span>
+      )}
       <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-zinc-100 px-4 py-2.5 text-[15px] leading-relaxed dark:bg-zinc-800">
         {text}
       </div>
@@ -174,10 +209,12 @@ function ThreadSkeleton() {
 function EmptyState({
   documents,
   onPick,
+  onResearch,
   onOpenLibrary,
 }: {
   documents: string[];
   onPick: (prompt: string) => void;
+  onResearch: () => void;
   onOpenLibrary: () => void;
 }) {
   const regions = [...new Set(documents)];
@@ -212,6 +249,23 @@ function EmptyState({
           )}
         </button>
       </div>
+      <button
+        type="button"
+        onClick={onResearch}
+        className="group mb-2.5 flex w-full items-start gap-3 rounded-xl border border-teal-600/30 bg-gradient-to-br from-teal-50/80 to-white p-3.5 text-left transition hover:border-teal-600/60 hover:shadow-sm dark:from-teal-950/40 dark:to-zinc-900"
+      >
+        <span className="rounded-lg bg-teal-700 p-1.5 text-white">
+          <Telescope className="size-4" />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-[11px] font-semibold uppercase tracking-wider text-teal-700 dark:text-teal-400">
+            Deep research · agent plans, verifies every section
+          </span>
+          <span className="mt-0.5 block text-sm leading-snug text-zinc-700 dark:text-zinc-300">
+            {RESEARCH_SUGGESTION}
+          </span>
+        </span>
+      </button>
       <div className="grid gap-2.5 sm:grid-cols-2">
         {SUGGESTIONS.map(({ icon: Icon, label, prompt }) => (
           <button
@@ -239,12 +293,17 @@ function Composer({
   onChange,
   onSubmit,
   disabled,
+  mode,
+  onModeChange,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
   disabled: boolean;
+  mode: Mode;
+  onModeChange: (mode: Mode) => void;
 }) {
+  const research = mode === "research";
   const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -258,7 +317,8 @@ function Composer({
     if (!disabled) ref.current?.focus();
   }, [disabled]);
 
-  const tooLong = value.length > MAX_MESSAGE;
+  const limit = research ? 500 : MAX_MESSAGE;
+  const tooLong = value.length > limit;
   return (
     <div className="shrink-0 px-4 pb-4 pt-2 md:px-6">
       <form
@@ -268,7 +328,27 @@ function Composer({
           if (!tooLong) onSubmit();
         }}
       >
-        <div className="flex items-end gap-2 rounded-2xl border border-zinc-300 bg-white p-2 pl-4 shadow-sm transition focus-within:border-zinc-400 focus-within:shadow-md dark:border-zinc-700 dark:bg-zinc-900 dark:focus-within:border-zinc-600">
+        <div
+          className={`flex items-end gap-2 rounded-2xl border bg-white p-2 pl-2 shadow-sm transition focus-within:shadow-md dark:bg-zinc-900 ${
+            research
+              ? "border-teal-600/60 ring-2 ring-teal-600/10"
+              : "border-zinc-300 focus-within:border-zinc-400 dark:border-zinc-700 dark:focus-within:border-zinc-600"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => onModeChange(research ? "chat" : "research")}
+            aria-pressed={research}
+            title="Deep research: the agent plans questions and verifies each one"
+            className={`flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-xs font-medium transition ${
+              research
+                ? "bg-teal-700 text-white"
+                : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            }`}
+          >
+            <Telescope className="size-4" />
+            <span className="hidden sm:inline">Research</span>
+          </button>
           <textarea
             ref={ref}
             rows={1}
@@ -280,7 +360,13 @@ function Composer({
                 if (!disabled && !tooLong) onSubmit();
               }
             }}
-            placeholder={disabled ? "Working on your answer…" : "Ask about literacy, population, sex ratio, districts…"}
+            placeholder={
+              disabled
+                ? "Working on your answer…"
+                : research
+                  ? "Describe a research topic, e.g. literacy and gender balance in Odisha"
+                  : "Ask about literacy, population, sex ratio, districts…"
+            }
             className="max-h-[200px] min-h-[36px] flex-1 resize-none bg-transparent py-1.5 text-[15px] outline-none placeholder:text-zinc-400"
           />
           <button
@@ -293,10 +379,14 @@ function Composer({
           </button>
         </div>
         <p className="mt-2 flex justify-between px-1 text-[11px] text-zinc-400">
-          <span>Answers come only from the indexed Census reports. Shift + Enter for a new line.</span>
-          {value.length > MAX_MESSAGE - 500 && (
+          <span>
+            {research
+              ? "Deep research plans 3–5 questions and runs each through the full citation checks."
+              : "Answers come only from the indexed Census reports. Shift + Enter for a new line."}
+          </span>
+          {value.length > limit - (research ? 100 : 500) && (
             <span className={tooLong ? "text-red-500" : ""}>
-              {value.length}/{MAX_MESSAGE}
+              {value.length}/{limit}
             </span>
           )}
         </p>
