@@ -190,6 +190,8 @@ def test_real_worker_retries_a_transient_failure_then_indexes(
     job = stage(uploads)
     monkeypatch.setattr(worker, "_upload_service", lambda: uploads)
     monkeypatch.setattr(worker, "retry_countdown", lambda retries: 0)
+    # The task reads its retry limit from Settings; CI has no .env to supply GOOGLE_CLOUD_PROJECT.
+    monkeypatch.setattr(worker, "get_settings", lambda: upload_settings(tmp_path))
 
     with start_worker(worker.app, perform_ping_check=False, shutdown_timeout=30):
         worker.enqueue_upload(job.job_id)
