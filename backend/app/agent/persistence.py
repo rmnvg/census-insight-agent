@@ -248,6 +248,21 @@ class SessionStore:
             connection.execute("DELETE FROM app_messages WHERE session_id = ?", (session_id,))
             connection.execute("DELETE FROM app_sessions WHERE session_id = ?", (session_id,))
 
+    async def stale_session_ids(self, cutoff: datetime) -> list[str]:
+        rows = await asyncio.to_thread(self._updated_at_sync)
+        return [
+            session_id
+            for session_id, updated_at in rows
+            if datetime.fromisoformat(updated_at) < cutoff
+        ]
+
+    def _updated_at_sync(self) -> list[tuple[str, str]]:
+        if not self.database.is_file():
+            return []
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute("SELECT session_id, updated_at FROM app_sessions").fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
     async def touch(self, session_id: str) -> None:
         now = datetime.now(UTC).isoformat()
         await asyncio.to_thread(self._touch_sync, session_id, now)
@@ -297,6 +312,15 @@ class TraceStore:
         if len(matches) != 1:
             return None
         return RunTrace.model_validate_json(matches[0].read_text(encoding="utf-8"))
+
+    def write_feedback(self, session_id: str, run_id: str, *, positive: bool) -> None:
+        """Keep the latest rating for a run beside its trace; it goes when the session does."""
+        validate_session_id(session_id)
+        UUID(run_id)
+        path = self.root / "sessions" / session_id / "feedback" / f"{run_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"run_id": run_id, "positive": positive, "rated_at": datetime.now(UTC).isoformat()}
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
     def recover_validated_claim_history(self, session_id: str) -> list[ValidatedClaimTurn]:
         """Migrate successful pre-v3 traces without treating assistant prose as evidence."""

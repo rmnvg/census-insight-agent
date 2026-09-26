@@ -18,11 +18,15 @@ dependencies = [
 
 [project.optional-dependencies]
 backend = [
+    "celery[redis]==5.6.3",
     "fastapi==0.141.1",
     "google-genai==2.22.0",
     "langchain-google-genai==4.4.0",
+    "langfuse==4.15.6",
     "langgraph==1.2.11",
+    "langgraph-checkpoint-postgres==3.1.2",
     "langgraph-checkpoint-sqlite==3.0.3",
+    "psycopg[binary,pool]==3.3.6",
     "pydantic-settings==2.15.0",
     "pymupdf4llm==1.28.2",
     "python-multipart==0.0.32",
@@ -81,3 +85,8 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 files = ["backend", "executor", "frontend", "scripts", "evals"]
+
+[[tool.mypy.overrides]]
+# Celery ships no type information.
+module = ["celery", "celery.*"]
+ignore_missing_imports = true

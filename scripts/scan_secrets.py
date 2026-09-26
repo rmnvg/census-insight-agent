@@ -17,6 +17,12 @@ PATTERNS: dict[str, re.Pattern[bytes]] = {
     "database_password": re.compile(
         rb"(?i)(?:database_url|db_password|database_password)\s*[=:]\s*[^\s\"']{8,}"
     ),
+    # scheme://user:password@host for the stores this project uses; pass passwords via PGPASSWORD
+    # or equivalent instead.
+    "url_credentials": re.compile(
+        rb"(?i)\b(?:postgres(?:ql)?|redis|rediss|amqp|mysql|mongodb(?:\+srv)?)://"
+        rb"[^\s:/@\"']+:[^\s@/\"']+@"
+    ),
     "personal_absolute_path": re.compile(rb"/(?:Users|home)/[^/\s]+/"),
     "personal_email": re.compile(rb"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
 }

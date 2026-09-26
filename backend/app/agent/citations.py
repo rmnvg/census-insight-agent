@@ -38,16 +38,23 @@ def validate_and_materialize_citations(
     pruned: list[tuple[str, str]] = []
     claim_citations: dict[str, list[str]] = {}
     for claim in draft.claims:
+        # Prefer the calculation with exactly this claim's operation and operands. Several
+        # calculations can cite the same chunks (total, rural, and urban from one table), and
+        # pairing by evidence alone would hand each derived claim the first of them.
         matching_calculation = next(
             (
                 item
                 for item in calculations or []
+                if claim.derivation is not None
+                and claim.derivation.operation == item.operation
+                and claim.derivation.operands == item.values
+            ),
+            None,
+        ) or next(
+            (
+                item
+                for item in calculations or []
                 if set(item.evidence_ids) <= set(claim.evidence_ids)
-                or (
-                    claim.derivation is not None
-                    and claim.derivation.operation == item.operation
-                    and claim.derivation.operands == item.values
-                )
             ),
             None,
         )

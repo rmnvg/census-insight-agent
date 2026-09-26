@@ -2,6 +2,8 @@
 """Run the trust benchmark against a live API and write the scorecard the UI displays.
 
 Billable: each case is a full agent turn on Vertex Gemini. Requires --allow-paid-calls.
+`--repeat N` asks every case N times and reports cases whose runs disagree; `--responses-out`
+records raw responses so `scripts/rescore_trust_benchmark.py` can re-score them for free.
 
     uv run --frozen python scripts/trust_benchmark.py --allow-paid-calls \
         --output data/processed/trust-scorecard.json
@@ -21,7 +23,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.app.trust import TrustCase, score_case, summarize  # noqa: E402
+from backend.app.trust import CaseResult, TrustCase, score_case, summarize  # noqa: E402
 
 RETRYABLE = {
     "BACKEND_UNREACHABLE",
@@ -49,25 +51,34 @@ def post(base: str, path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any
         return 0, {"error_code": "BACKEND_UNREACHABLE"}
 
 
-def run_case(base: str, case: TrustCase) -> Any:
+def converse(base: str, case: TrustCase) -> tuple[int, dict[str, Any]]:
+    """Ask a case in a fresh session: any setup turns first, then the scored question."""
+    status, session = post(base, "/sessions", {})
+    if status != 200:
+        return status, session
+    for message in [*case.setup_turns, case.question]:
+        status, body = post(
+            base, "/chat", {"session_id": session["session_id"], "message": message}
+        )
+        if status != 200:
+            return status, body
+    return status, body
+
+
+def run_case(base: str, case: TrustCase) -> tuple[CaseResult, dict[str, Any] | None]:
     attempts, started = 0, time.monotonic()
     while True:
         attempts += 1
-        status, session = post(base, "/sessions", {})
+        status, body = converse(base, case)
         if status == 200:
-            status, body = post(
-                base, "/chat", {"session_id": session["session_id"], "message": case.question}
-            )
-        else:
-            body = session
-        if status == 200:
-            return score_case(
+            result = score_case(
                 case, body, latency_seconds=time.monotonic() - started, attempts=attempts
             )
+            return result, body
         code = body.get("error_code") or f"HTTP_{status}"
         # One retry for transient provider errors only; the attempt count is reported.
         if code not in RETRYABLE or attempts >= 2:
-            return score_case(
+            result = score_case(
                 case,
                 None,
                 latency_seconds=time.monotonic() - started,
@@ -75,6 +86,7 @@ def run_case(base: str, case: TrustCase) -> Any:
                 error_code=code,
                 trace_id=body.get("trace_id"),
             )
+            return result, None
 
 
 def main() -> int:
@@ -84,7 +96,23 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("data/processed/trust-scorecard.json"))
     parser.add_argument("--model", default=os.environ.get("GEMINI_CHAT_MODEL", "gemini-2.5-flash"))
     parser.add_argument("--only", nargs="*", help="Run only these case IDs")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Ask every case this many times; cases with mixed outcomes are reported as unstable.",
+    )
+    parser.add_argument(
+        "--responses-out",
+        type=Path,
+        help="Also save each raw API response (JSON lines) so the run can be re-scored offline.",
+    )
     parser.add_argument("--allow-paid-calls", action="store_true")
+    parser.add_argument(
+        "--publish-langfuse",
+        action="store_true",
+        help="Also record the run as a Langfuse dataset experiment (needs LANGFUSE_* settings).",
+    )
     args = parser.parse_args()
     if not args.allow_paid_calls:
         print(
@@ -98,13 +126,24 @@ def main() -> int:
     if args.only:
         cases = [case for case in cases if case.case_id in set(args.only)]
     results = []
-    for case in cases:
-        result = run_case(args.base_url.rstrip("/"), case)
-        results.append(result)
-        mark = "PASS" if result.passed else "FAIL"
-        detail = result.error_code or ", ".join(result.missing + result.ungrounded_claims[:1]) or ""
-        line = f"{mark} {case.case_id:<20} {result.outcome:<9} {result.latency_seconds:>6.1f}s"
-        print(f"{line} {detail}", flush=True)
+    recorded = args.responses_out.open("w", encoding="utf-8") if args.responses_out else None
+    for repeat in range(1, args.repeat + 1):
+        for case in cases:
+            result, response = run_case(args.base_url.rstrip("/"), case)
+            result = result.model_copy(update={"repeat": repeat})
+            results.append(result)
+            if recorded is not None:
+                line = {"case_id": case.case_id, "repeat": repeat, "response": response}
+                recorded.write(json.dumps(line) + "\n")
+                recorded.flush()
+            mark = "PASS" if result.passed else "FAIL"
+            detail = result.error_code or "; ".join(result.failures[:2]) or ""
+            line_text = (
+                f"{mark} {case.case_id:<22} {result.outcome:<9} {result.latency_seconds:>6.1f}s"
+            )
+            print(f"{line_text} {detail}", flush=True)
+    if recorded is not None:
+        recorded.close()
     card = summarize(results, args.model)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(card.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -112,11 +151,19 @@ def main() -> int:
         f"{card.cases_passed}/{card.cases_total} passed",
         f"answerable {card.answerable_passed}/{card.answerable_total}",
         f"refusals {card.refusal_passed}/{card.refusal_total}",
-        f"ungrounded claims {card.ungrounded_claims}",
         f"wrong answers {card.wrong_answers}",
+        f"unsupported {card.unsupported_answers}",
+        f"unnecessary refusals {card.false_refusals}",
+        f"incomplete {card.incomplete_answers}",
         f"median {card.median_latency_seconds}s",
     ]
+    if card.unstable_cases:
+        summary.append(f"unstable: {', '.join(card.unstable_cases)}")
     print("\n" + " · ".join(summary) + f" -> {args.output}")
+    if args.publish_langfuse:
+        from scripts.publish_trust_scorecard import publish
+
+        return publish(args.output, args.cases, None)
     return 0
 
 

@@ -13,6 +13,7 @@ ExecutionErrorCode = Literal[
     "ARTIFACT_NOT_CREATED",
     "JOB_PROTOCOL_ERROR",
     "EXECUTOR_UNAVAILABLE",
+    "EXECUTION_INTERRUPTED",
 ]
 ArtifactType = Literal["chart", "table", "data", "manifest"]
 

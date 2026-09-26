@@ -395,6 +395,37 @@ def test_atomic_submission_and_worker_round_trip(tmp_path: Path) -> None:
     }
 
 
+def test_restart_fails_interrupted_jobs_and_removes_their_partial_output(
+    tmp_path: Path,
+) -> None:
+    client = ExecutionQueueClient(tmp_path)
+    value = request(TABLE_CODE)
+    client.submit(value)
+    worker = Worker(tmp_path)
+    # A worker that died mid-job leaves its claim in processing/ and unvalidated output behind.
+    (tmp_path / "inbox" / f"{value.job_id}.json").replace(
+        tmp_path / "processing" / f"{value.job_id}.json"
+    )
+    partial = tmp_path / "jobs" / value.job_id / "output"
+    partial.mkdir(parents=True)
+    (partial / "table.csv").write_text("row_id,value\nkarnataka,75", encoding="utf-8")
+    (tmp_path / "processing" / "not-a-job.json").write_text("{}", encoding="utf-8")
+    queued = request(TABLE_CODE)
+    client.submit(queued)
+
+    assert Worker(tmp_path).recover_interrupted() == 1
+
+    assert not list((tmp_path / "processing").iterdir())
+    assert not (tmp_path / "jobs" / value.job_id).exists()
+    result = asyncio.run(client.wait(value.job_id, 1))
+    assert (result.status, result.error_code) == ("failed", "EXECUTION_INTERRUPTED")
+    assert result.artifacts == []
+    # Only claimed jobs were interrupted; the queue still holds unclaimed work.
+    assert (tmp_path / "inbox" / f"{queued.job_id}.json").is_file()
+    assert worker.run_once()
+    assert asyncio.run(client.wait(queued.job_id, 1)).status == "succeeded"
+
+
 def test_missing_executor_result_is_bounded_and_typed(tmp_path: Path) -> None:
     client = ExecutionQueueClient(tmp_path, poll_seconds=0.001)
     with pytest.raises(ExecutorUnavailableError):

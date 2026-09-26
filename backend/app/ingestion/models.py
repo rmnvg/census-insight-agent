@@ -212,6 +212,7 @@ class DocumentIngestionResult(BaseModel):
     citation_ready_chunks: int = 0
     chunks_missing_provenance: int = 0
     skipped_unchanged: bool = False
+    structured_tables: int = 0
     failures: list[str] = Field(default_factory=list)
 
 

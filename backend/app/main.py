@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from backend.app.agent.service import get_agent_service
 from backend.app.api import router
 from backend.app.config import get_settings
 from backend.app.retrieval.sparse import BM25SparseEncoder
@@ -36,6 +37,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             cache_dir=settings.data_root / "processed" / "fastembed-cache",
         )
     yield
+    # Postgres state holds connection pools; release them instead of dropping them at exit.
+    if get_agent_service.cache_info().currsize:
+        with suppress(Exception):
+            await get_agent_service().close()
 
 
 _UPLOAD_PATH = "/documents/upload"

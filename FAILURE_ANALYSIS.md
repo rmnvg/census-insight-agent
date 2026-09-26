@@ -37,6 +37,8 @@
 - **Safety impact:** Would have been the same failure class as the OCR case above — citing a real page while asserting an unverified fact — but for computed rankings instead of extracted values.
 - **Current mitigation:** `count_table_entity_rows` (`backend/app/execution/hydration.py`) independently counts distinct entity labels in the trusted evidence, excluding repeated headers and the state/UT aggregate row, and `prepare_artifact` refuses (`MODEL_OUTPUT_INVALID` / `RANKING_COVERAGE_INCOMPLETE`) when the hydrated dataset covers fewer rows than detected. A second, narrower guard (`RANKING_INCLUDES_AGGREGATE_ROW`) rejects the case where the winning row is the state total rather than an individual entity, since the aggregate row shares the same table and could otherwise win a "lowest" query. Both are covered by regression tests in `backend/tests/test_agent_ranking.py`.
 - **Proposed future fix:** The row-completeness check is a heuristic lower bound on distinct labels, not an exact table parser; a genuinely adversarial or malformed table could still evade it. A stronger fix would independently extract the full row set deterministically (not via the model at all) before ever calling the model for a proposal, removing the completeness question rather than detecting it after the fact.
+- **2026-09-26:** that fix now applies whenever a structured table store resolves the column: the
+  dataset is every row of the table, and the heuristic count is used only on the fallback path.
 
 ### Ranking row matching against the real corpus — fixed
 
@@ -188,12 +190,121 @@
 - **Root cause:** The longest legitimate path (artifact, one repair, refusal) takes 16 supersteps, exactly `AGENT_MAX_STEPS`. It escaped as an untyped `GraphRecursionError` (seen as a research section crash).
 - **Current mitigation:** The limit is 24 in Settings, `docker-compose.yml`, and `.env.example`. Any recursion-limit hit is now a typed, retryable `AGENT_STEP_LIMIT`, and a research section never sinks its brief.
 
-### District ranking by literacy rate — known limitation
+### District ranking by literacy rate — fixed
 
 - **Input:** "Which district of Karnataka had the highest literacy rate?"
-- **Observed behavior:** Hydration refuses (`UNSUPPORTED_OR_WRONG_TABLE_CELL`).
-- **Root cause:** Literacy tables carry several near-identical numeric columns (2001 and 2011, each Total/Rural/Urban) next to sibling male and female tables, and the proposal does not bind reliably to the 2011 Total column. Fails closed.
-- **Current mitigation:** Deep Research plans district rankings for sex ratio only.
+- **Observed behavior:** Hydration refused (`UNSUPPORTED_OR_WRONG_TABLE_CELL`). The benchmark case
+  `od-top-literacy` (Khordha 86.9) ended in `MODEL_OUTPUT_INVALID` on both runs.
+- **Root cause:** Literacy tables put 2001 and 2011, each with Total/Rural/Urban, under one
+  "Literacy Rate" header. The chunker keeps only the first header row on later fragments, so a
+  value in those fragments could not be tied to its year and residence.
+- **Current mitigation:** Rankings read from structured tables parsed from the whole Markdown table
+  (DESIGN.md, "Structured tables"). The dataset holds every district row with no model proposal,
+  and each row is cited from the chunk that contains it. Deep Research may now plan literacy
+  rankings.
+- **Verified live:** Karnataka Dakshina Kannada 88.57; Odisha Khordha 86.9 (lowest Nabarangapur
+  46.4); Madhya Pradesh lowest Alirajpur 36.1; female, Bhopal 74.9; rural Karnataka, Dakshina
+  Kannada 85.33. Each matches its source table. The four benchmark ranking cases, run twice,
+  passed 8 of 8 (previously 5 of 8), at a median of 5.8 seconds (previously 15 to 29).
+- **Found live:** the first answer for a female-literacy question read "the highest Literacy Rate
+  (74.9 percent) among Literacy Rate by district in Madhya Pradesh", which did not say "female".
+  The dataset title now names any non-default population or residence.
+
+### Query resolution turned a ranking into a lookup — fixed
+
+- **Input:** A Deep Research section asking "Which district of Odisha had the highest literacy
+  rate?"
+- **Observed behavior:** `MODEL_OUTPUT_INVALID`, although the same question answered correctly on
+  its own.
+- **Root cause:** The classifier set `rank_all`, but the query resolver's rewrite ("What was the
+  literacy rate of Odisha in 2011?") came back as a one-region comparison. The merge kept the
+  classifier's regions and scopes but let the resolver drop the ranking.
+- **Current mitigation:** A ranking the classifier found survives resolution. The regression test
+  replays the resolver output from the live trace. On a rerun, all three sections of the brief
+  answered.
+
+### Research sections failed with `database is locked` — fixed
+
+- **Input:** A research brief, or any turns that start together against a fresh SQLite state file.
+- **Observed behavior:** One section intermittently ended as "could not be completed". The
+  research tests failed in 5 of 25 runs.
+- **Root cause:** Every turn opened its own checkpoint connection, and each new connection ran
+  LangGraph's setup script (a WAL journal-mode switch plus table DDL) on first use. Concurrent
+  first turns collided on the same file.
+- **Current mitigation:** `SqliteStateBackend` runs the checkpoint and session schema setup once,
+  under a process lock, and marks each per-turn connection as already set up. A regression test
+  starts eight first turns together on a fresh database. It failed in 6 of 12 runs before the
+  fix and passes in 20 of 20 after; the research tests pass in 25 of 25.
+
+### Per-residence comparisons refused although the draft was correct — fixed
+
+- **Input:** "How does that compare with Madhya Pradesh?" after Odisha's sex ratio, which drafts
+  total, rural, and urban comparisons.
+- **Observed behavior:** A correct draft (differences 48, 53, 14) was rejected with
+  `INVALID_DERIVATION`, and the repair dropped a target, so the answer was refused.
+- **Root cause:** Derived claims were paired with the first app-computed calculation whose
+  evidence they cited. All three calculations cite the same two table chunks, so the rural and
+  urban claims were checked against the total calculation.
+- **Current mitigation:** A derived claim is paired with the calculation that has exactly its
+  operation and operands, falling back to evidence only when it states none. Derived sentences now
+  name the residence ("In rural areas, …") so the three differences are distinguishable. The
+  benchmark case `followup-compare` covers it.
+
+### Trust scorer passed misattributed answers — fixed
+
+- **Input:** Real recorded answers with one deliberate corruption each.
+- **Observed behavior:** The scorer passed swapped region labels, a rural value stated as the
+  total, a 2011 value labelled 2001, and a value moved to another region's row.
+- **Root cause:** Expected numbers were matched anywhere in the answer, labels anywhere in the
+  text, and grounding meant the number appeared anywhere in a table quote holding dozens of
+  numbers.
+- **Current mitigation:** Fact tuples matched against each claim's own fields, contradictions
+  counted as wrong answers, and provenance checked by locating the value on its region's row and
+  column in the cited quote. See DESIGN.md, "Trust scorecard".
+
+### Questions about 2001 declined — known limitation
+
+- **Input:** "What was the sex ratio of Karnataka in 2001?" (and Odisha).
+- **Observed behavior:** The agent declines, or asks whether 2011 is meant instead.
+- **Root cause:** Task classification treats the corpus as 2011-only, although its tables carry
+  2001 columns beside the 2011 ones.
+- **Safety impact:** None; it is the safe failure, and the benchmark counts it as an unnecessary
+  refusal rather than a wrong answer.
+- **Proposed future fix:** Scope questions by the years the tables actually contain, then rely on
+  the column provenance checks to keep 2001 and 2011 values apart.
+
+### Failed-upload cleanup could leave evidence without its source PDF — fixed
+
+- **Input:** An upload whose indexing fails after its points were upserted, while Qdrant is
+  unreachable.
+- **Observed behavior:** The error from removing the points was suppressed, and the source PDF was
+  deleted anyway. The points stayed retrievable, citing a PDF that no longer existed. A late
+  failure also left the generated manifest behind, so the failed document still appeared in the
+  library, and uploading the same PDF again was rejected as a duplicate.
+- **Root cause:** Cleanup deleted the source first and treated point removal as best-effort.
+- **Current mitigation:** A failed document is first withdrawn with a durable marker. Retrieval and
+  the scroll-based collectors exclude it from then on. Its points are removed next. Only then are
+  its PDF, manifests, and marker deleted. An unfinished withdrawal is retried at startup and before
+  each job. A re-upload of the same PDF retries it first and returns 503 while Qdrant is still
+  down.
+- **Found live:** Against a real Qdrant 1.15 server, a search naming the withdrawn document still
+  returned it: the server ignores `must_not` when `must` matches the same `document_id`. Local-mode
+  Qdrant does not reproduce this, so the unit test passed. Retrieval now removes withdrawn IDs from
+  the requested set instead, and `backend/tests/test_qdrant_server.py` runs against a real server
+  in `make integration-test` and CI.
+
+### Executor restart stranded in-flight jobs — fixed
+
+- **Input:** The executor container is killed (OOM, restart) while running a job.
+- **Observed behavior:** The claimed request stayed in `processing/` forever with its partial output
+  under `jobs/`. The backend learned nothing until its result deadline passed.
+- **Root cause:** The worker only consumed `inbox/`; nothing reconciled claims from a previous
+  process.
+- **Current mitigation:** At startup the worker fails every claimed job with
+  `EXECUTION_INTERRUPTED` and deletes its unvalidated output. It does not re-run the job: the job may
+  be what killed the worker, and re-running it would crash-loop the only consumer. Verified live by
+  killing the real executor container mid-job. After a restart, the waiting backend received the
+  failure within seconds, and the next job succeeded.
 
 ## Streamlit boundary failures
 
@@ -370,3 +481,5 @@ blocked. The generation prompt still prefers restricted `Path.read_text`/`Path.w
 - **Executor unavailable:** a missing/stale heartbeat or result deadline produces
   `EXECUTOR_UNAVAILABLE`. The agent returns a graceful artifact failure and does not imply that an
   artifact was created. Existing successful conversation memory remains intact.
+- **Executor restarted mid-job:** the restarted worker reports the job as `EXECUTION_INTERRUPTED`
+  and removes its partial output. It is not repaired or re-run.

@@ -1,0 +1,120 @@
+# Production-shaped deployment on one host: two stateless API replicas over shared Postgres state,
+# and a durable Celery worker (Redis broker) that indexes uploads outside the API processes.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build
+#
+# Needs POSTGRES_PASSWORD in .env. The replicas listen on 127.0.0.1:8000 and 127.0.0.1:8001, and
+# the web UI reaches them through Docker's service DNS. Postgres and Redis publish no ports and sit
+# on an internal network with no route out. The executor is unchanged: both replicas share its
+# filesystem queue through the workspace mount.
+services:
+  backend:
+    deploy:
+      replicas: 2
+    ports: !override
+      - "127.0.0.1:8000-8001:8000"
+    environment:
+      # No password in the URL: libpq reads PGPASSWORD.
+      STATE_DATABASE_URL: "postgresql://census@postgres:5432/census"
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env for the scaled deployment}
+      INGESTION_BROKER_URL: "redis://redis:6379/0"
+      INGESTION_MAX_RETRIES: ${INGESTION_MAX_RETRIES:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - state
+
+  ingest-worker:
+    extends:
+      file: docker-compose.yml
+      service: backend
+    command:
+      [
+        "celery",
+        "-A",
+        "backend.app.ingestion.worker",
+        "worker",
+        "--concurrency=1",
+        "--queues=ingestion",
+        "--max-tasks-per-child=20",
+        "--loglevel=INFO",
+      ]
+    ports: !reset []
+    environment:
+      INGESTION_BROKER_URL: "redis://redis:6379/0"
+      INGESTION_MAX_RETRIES: ${INGESTION_MAX_RETRIES:-3}
+      # Must exceed the longest indexing job; an unacknowledged job is redelivered after it.
+      INGESTION_VISIBILITY_TIMEOUT_SECONDS: ${INGESTION_VISIBILITY_TIMEOUT_SECONDS:-1800}
+    # Only what indexing needs: ADC for embeddings and the data tree. No workspace, no executor
+    # queue, no frontend network.
+    volumes: !override
+      - type: bind
+        source: ${GOOGLE_CREDENTIALS_HOST_PATH:?Set GOOGLE_CREDENTIALS_HOST_PATH to an ADC JSON file}
+        target: /var/secrets/google/adc.json
+        read_only: true
+      - type: bind
+        source: ./data
+        target: /app/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A backend.app.ingestion.worker inspect ping -d celery@$$HOSTNAME --timeout 5",
+        ]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+    depends_on: !override
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: !override
+      - backend_data
+      - state
+
+  postgres:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_USER: census
+      POSTGRES_DB: census
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env for the scaled deployment}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "census", "-d", "census"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - state
+
+  redis:
+    image: redis:7.4.6-alpine@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+    # Append-only persistence: a queued job survives a Redis restart.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", ""]
+    volumes:
+      - redis_data:/data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - state
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  state:
+    internal: true

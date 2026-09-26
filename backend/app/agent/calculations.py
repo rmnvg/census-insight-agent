@@ -157,8 +157,16 @@ def add_deterministic_derived_claims(
             "percentage_points": " percentage points",
             "percent": " percent",
         }.get(calculation.unit, "")
+        # Total, rural, and urban comparisons can appear side by side; name the scope so the
+        # three differences are not indistinguishable. Totals keep the plain sentence.
+        scope = (left.residence_scope or "").casefold()
+        prefix = (
+            f"In {scope} areas, "
+            if scope in {"rural", "urban"} and scope == (right.residence_scope or "").casefold()
+            else ""
+        )
         text = (
-            f"{left.region or 'The first value'} is {relation} than "
+            f"{prefix}{left.region or 'The first value'} is {relation} than "
             f"{right.region or 'the second value'} by {formatted}{unit_text}."
         )
         evidence_ids = list(

@@ -9,16 +9,20 @@ from pydantic import BaseModel, Field
 from qdrant_client import models
 
 from backend.app.agent.calculations import rounded_subtraction
-from backend.app.agent.models import EvidenceReference
+from backend.app.agent.models import ArtifactDataRequirement, EvidenceReference
 from backend.app.agent.skills import RuntimeSkill, SkillMetadata, SkillRegistry
 from backend.app.ingestion.models import (
     CoverageLimitation,
     DocumentCoverageReport,
     DocumentManifest,
 )
+from backend.app.ingestion.uploads import withdrawn_document_ids
 from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
+from backend.app.tables.models import DocumentTables
+from backend.app.tables.selection import ColumnSelection, TableSelectionError, select_column
+from backend.app.tables.store import load_document_tables, tables_path
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -91,6 +95,14 @@ class StaleEvidenceError(RuntimeError):
     """Previously validated evidence no longer matches the current Qdrant payload."""
 
 
+class TableLookup(BaseModel):
+    """A verified table column with the indexed chunks that cite it, or why there is none."""
+
+    selection: ColumnSelection | None = None
+    evidence: list[RetrievedEvidence] = Field(default_factory=list)
+    reason: str | None = None
+
+
 class AgentTools:
     """Narrow validated tools; none exposes vectors or arbitrary filesystem access."""
 
@@ -109,6 +121,7 @@ class AgentTools:
         self.data_root = data_root
         self.timeout_seconds = timeout_seconds
         self._titles: dict[tuple[str, str], dict[tuple[str, ...], str]] = {}
+        self._table_stores: dict[str, tuple[float, DocumentTables]] = {}
 
     async def search_documents(self, value: SearchDocumentsInput) -> list[RetrievedEvidence]:
         results = await asyncio.wait_for(
@@ -233,7 +246,14 @@ class AgentTools:
             records.extend(page)
             if offset is None:
                 break
-        return records
+        # Filtered here, not in Qdrant: every caller already filters on `document_id`, and
+        # Qdrant 1.15 mis-evaluates `must_not` on a key that `must` also matches.
+        withdrawn = set(withdrawn_document_ids(self.data_root))
+        return [
+            record
+            for record in records
+            if (record.payload or {}).get("document_id") not in withdrawn
+        ]
 
     async def collect_summary_evidence(
         self, document_id: str, *, max_sections: int = 24
@@ -311,6 +331,74 @@ class AgentTools:
                 )
             )
         return sorted(matched, key=lambda item: item.page_number)
+
+    async def select_table_column(
+        self, document_id: str, requirement: ArtifactDataRequirement
+    ) -> TableLookup:
+        """Resolve a whole-table request to one column of the document's table store.
+
+        Every row the selection uses is re-read from Qdrant and must still sit, verbatim, in the
+        chunk the store recorded, with the same page and source checksum. Otherwise the store is
+        stale and the caller falls back to scanning chunks.
+        """
+        if document_id in withdrawn_document_ids(self.data_root):
+            return TableLookup(reason="DOCUMENT_WITHDRAWN")
+        store = await asyncio.to_thread(self._document_tables, document_id)
+        if store is None:
+            return TableLookup(reason="TABLE_STORE_MISSING")
+        try:
+            selection = select_column(
+                store,
+                metric=requirement.metric,
+                year=requirement.year,
+                residence=requirement.residence_scope,
+                population=requirement.population_scope,
+            )
+        except TableSelectionError as error:
+            return TableLookup(reason=error.code)
+        chunk_ids = list(
+            dict.fromkeys(record.chunk_id for record in selection.records if record.chunk_id)
+        )
+        points = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.store.client.retrieve,
+                self.store.collection_name,
+                ids=chunk_ids,
+                with_payload=True,
+                with_vectors=False,
+            ),
+            timeout=self.timeout_seconds,
+        )
+        payloads = {str(point.id): point.payload or {} for point in points}
+        for record in selection.records:
+            payload = payloads.get(record.chunk_id or "")
+            if (
+                payload is None
+                or payload.get("document_id") != document_id
+                or payload.get("page_number") != record.page_number
+                or payload.get("source_checksum") != store.source_checksum
+                or record.line not in str(payload.get("text", "")).splitlines()
+            ):
+                return TableLookup(reason="TABLE_STORE_STALE")
+        evidence = [
+            RetrievedEvidence.model_validate({**payloads[chunk_id], "retrieval_score": 0.0})
+            for chunk_id in chunk_ids
+        ]
+        return TableLookup(selection=selection, evidence=await self.with_table_titles(evidence))
+
+    def _document_tables(self, document_id: str) -> DocumentTables | None:
+        """The parsed store, re-read only when its file changes (a store is ~1 MB of JSON)."""
+        try:
+            modified = tables_path(self.data_root, document_id).stat().st_mtime
+        except (OSError, ValueError):
+            return None
+        cached = self._table_stores.get(document_id)
+        if cached is not None and cached[0] == modified:
+            return cached[1]
+        store = load_document_tables(self.data_root, document_id)
+        if store is not None:
+            self._table_stores[document_id] = (modified, store)
+        return store
 
     async def expand_candidate_pages(
         self, candidates: list[RetrievedEvidence], *, max_pages_per_document: int = 3

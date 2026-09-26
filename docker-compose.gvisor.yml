@@ -1,0 +1,15 @@
+# Run the executor, the only service that runs model-generated code, under gVisor.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gvisor.yml up
+#
+# gVisor (`runsc`) is a user-space kernel, not a VM: the sandbox's system calls are served by
+# gVisor's Sentry, so exploiting the untrusted code's kernel means exploiting gVisor, not the host
+# kernel. Every existing control still applies: no network, read-only root, all capabilities
+# dropped, non-root UID, resource limits, and the AST policy gate.
+#
+# Needs a Linux Docker host with runsc installed and registered (`sudo runsc install`, then
+# restart Docker). Docker Desktop has no runsc runtime. CI runs the executor smoke test under
+# this file on every push. Combine with the scaled deployment by adding both override files.
+services:
+  executor:
+    runtime: runsc

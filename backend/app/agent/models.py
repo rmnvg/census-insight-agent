@@ -13,6 +13,7 @@ from backend.app.execution.contracts import (
     SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.tables.selection import ColumnSelection
 
 TaskType = Literal[
     "lookup",
@@ -384,6 +385,7 @@ class AgentState(TypedDict, total=False):
     conversation_summary: str
     calculations: list[CalculationResult]
     artifact_dataset: ArtifactDataset | None
+    table_selection: ColumnSelection | None
     ranking_winner: SourceRecord | None
     generated_code: str | None
     execution_request: ExecutionRequest | None

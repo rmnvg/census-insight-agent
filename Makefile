@@ -1,4 +1,4 @@
-.PHONY: trust-benchmark web-install web-check web-dev sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
+.PHONY: build-tables rescore-trust-benchmark integration-test up-scale up-gvisor executor-smoke-gvisor publish-trust-scorecard trust-benchmark web-install web-check web-dev sync test format format-check lint typecheck check verify-offline qdrant-readonly security secret-scan verify-vertex ingest-dry-run initialize-corpus run-backend run-frontend run-executor executor-smoke artifact-replay artifact-schema-report ui-smoke frontend-security live-eval prune-checkpoints prune-checkpoints-dry-run
 
 sync:
 	uv sync --frozen
@@ -21,6 +21,21 @@ typecheck:
 check:
 	sh scripts/check.sh
 
+# Postgres state and the real-Redis worker path against throwaway containers (needs Docker).
+integration-test:
+	sh scripts/integration_test.sh
+
+# Two API replicas over Postgres state plus the durable Celery/Redis upload worker.
+up-scale:
+	docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build --detach --wait
+
+# The executor under gVisor (Linux hosts with runsc registered as a Docker runtime).
+up-gvisor:
+	docker compose -f docker-compose.yml -f docker-compose.gvisor.yml up --build --detach --wait
+
+executor-smoke-gvisor:
+	docker compose -f docker-compose.yml -f docker-compose.gvisor.yml exec -T executor python scripts/verify_executor_runtime.py --expect-gvisor
+
 verify-offline: check qdrant-readonly
 
 qdrant-readonly:
@@ -41,12 +56,24 @@ ingest-dry-run:
 initialize-corpus:
 	uv run --frozen python scripts/initialize_corpus.py
 
+# No model calls: derive table stores for an already-indexed corpus (ingestion writes them itself).
+build-tables:
+	uv run --frozen python -m backend.app.tables.cli
+
 live-eval:
 	uv run --frozen python scripts/live_evaluation.py
 
 # Billable: every case is a full agent turn. Copy the output to evals/ to ship it with the repo.
 trust-benchmark:
-	uv run --frozen python scripts/trust_benchmark.py --allow-paid-calls --output data/processed/trust-scorecard.json
+	uv run --frozen python scripts/trust_benchmark.py --allow-paid-calls --repeat 2 --output data/processed/trust-scorecard.json --responses-out data/processed/trust-responses.jsonl
+
+# No model calls: re-score the last recorded run with the current scorer.
+rescore-trust-benchmark:
+	uv run --frozen python scripts/rescore_trust_benchmark.py --responses data/processed/trust-responses.jsonl --scorecard data/processed/trust-scorecard.json --output data/processed/trust-scorecard.json
+
+# No model calls: records a saved scorecard as a Langfuse experiment run (needs LANGFUSE_* set).
+publish-trust-scorecard:
+	uv run --frozen python scripts/publish_trust_scorecard.py --scorecard evals/trust-scorecard.json
 
 run-backend:
 	uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload

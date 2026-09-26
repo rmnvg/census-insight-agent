@@ -304,8 +304,8 @@ Otherwise return a title (at most 80 characters) and 3 to 5 sections. Each secti
   Do not ask about male/female, child, age-group, rural/urban, caste, or tribe subgroups; each
   section must be answerable from a state's or district's total-persons figure.
 - Use one of these forms: a lookup for one region; a comparison of two named regions; "Which
-  district of <region> had the highest/lowest sex ratio?" (district rankings use sex ratio only);
-  or "Create a bar chart comparing the <literacy rate or sex ratio> of <region> and <region>."
+  district of <region> had the highest/lowest <literacy rate or sex ratio>?"; or "Create a bar
+  chart comparing the <literacy rate or sex ratio> of <region> and <region>."
 - Include at most one chart section and at most one district-ranking section.
 - Order sections from the headline figure to detail. Do not repeat a question.""",
             f"{await self._catalog_note()}Research topic:\n{topic}",

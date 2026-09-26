@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import os
@@ -19,7 +20,23 @@ def network_is_blocked() -> bool:
     return False
 
 
+def kernel_is_gvisor() -> bool:
+    """gVisor reports its own kernel: `-gvisor` in current releases, a fixed build date in older."""
+    try:
+        version = Path("/proc/version").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "gvisor" in version.casefold() or "Sun Jan 10 15:06:54 PST 2016" in version
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Verify the executor's isolation from inside it.")
+    parser.add_argument(
+        "--expect-gvisor",
+        action="store_true",
+        help="Also require that the sandbox kernel is gVisor (docker-compose.gvisor.yml).",
+    )
+    args = parser.parse_args()
     credential_variables = sorted(
         key
         for key in os.environ
@@ -43,6 +60,8 @@ def main() -> int:
         "root_filesystem_read_only": root_read_only,
         "offline_executor_cases_passed": report["passed"],
     }
+    if args.expect_gvisor:
+        checks["gvisor_kernel"] = kernel_is_gvisor()
     output = {
         "checks": checks,
         "passed": all(checks.values()),

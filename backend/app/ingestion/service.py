@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import math
 import time
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from backend.app.ingestion.embeddings import CachedDenseEmbedder, EmbeddingCache
 from backend.app.ingestion.errors import PageMappingError
 from backend.app.ingestion.models import (
     CoverageLimitation,
+    DocumentChunk,
     DocumentCoverageReport,
     DocumentIngestionResult,
     DocumentManifest,
@@ -37,6 +39,10 @@ from backend.app.ingestion.safety import UnsafeExtractionError, validate_chunks_
 from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.sparse import BM25SparseEncoder
+from backend.app.tables.extraction import IndexedChunk, extract_document_tables
+from backend.app.tables.store import tables_path, write_document_tables
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionService:
@@ -172,6 +178,9 @@ class IngestionService:
                     store, dense_embedder, sparse_encoder = self._require_live_components()
                     state = self._read_state(pair.document_id)
                     if self._is_unchanged(state, checksum, len(chunks), store, content_fingerprint):
+                        result.structured_tables = self._write_tables(
+                            pair, checksum, mapping.pages, chunks
+                        )
                         result.skipped_unchanged = True
                         report.skipped_unchanged_documents += 1
                         report.documents.append(result)
@@ -193,6 +202,9 @@ class IngestionService:
                         checksum=checksum,
                         point_ids=[chunk.chunk_id for chunk in chunks],
                         content_fingerprint=content_fingerprint,
+                    )
+                    result.structured_tables = self._write_tables(
+                        pair, checksum, mapping.pages, chunks
                     )
                     result.dense_embeddings = len(dense_vectors)
                     result.sparse_embeddings = len(sparse_vectors)
@@ -278,6 +290,36 @@ class IngestionService:
         if not self.store or not self.dense_embedder or not self.sparse_encoder:
             raise RuntimeError("Live ingestion components are not configured")
         return self.store, self.dense_embedder, self.sparse_encoder
+
+    def _write_tables(
+        self,
+        pair: DocumentPair,
+        checksum: str,
+        pages: list[DocumentPage],
+        chunks: list[DocumentChunk],
+    ) -> int:
+        """Derive the document's table store from the chunks now in Qdrant.
+
+        The store is an optimization over the same evidence, not evidence itself: if extraction
+        fails, the stale store is removed and table questions fall back to chunk retrieval.
+        """
+        try:
+            tables = extract_document_tables(
+                document_id=pair.document_id,
+                region=pair.region,
+                source_checksum=checksum,
+                pages=pages,
+                chunks=[
+                    IndexedChunk(chunk.chunk_id, chunk.metadata.page_number, chunk.text)
+                    for chunk in chunks
+                ],
+            )
+            write_document_tables(self.settings.data_root, tables)
+        except Exception:
+            logger.exception("Table extraction failed for %s", pair.document_id)
+            tables_path(self.settings.data_root, pair.document_id).unlink(missing_ok=True)
+            return 0
+        return len(tables.tables)
 
     def _state_path(self, document_id: str) -> Path:
         safe_name = document_id.replace("/", "_").replace("\\", "_")

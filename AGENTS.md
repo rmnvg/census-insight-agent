@@ -29,3 +29,15 @@ These instructions apply to the entire repository.
 The repository contains Vertex AI providers, citation-safe ingestion, Qdrant hybrid retrieval, the
 citation-grounded LangGraph conversational agent, and an isolated artifact executor. The executor
 has no network or cloud credentials and communicates only through its filesystem queue.
+
+Structured table stores (`data/processed/tables/`, `backend/app/tables/`) are derived JSON, not a
+second database: every row is bound to the Qdrant chunk that contains it, and an answer still
+cites that chunk. Rebuild them with `make build-tables` after re-indexing outside ingestion.
+
+Opt-in production modes keep the default single-host deployment unchanged:
+`docker-compose.scale.yml` (Postgres conversation state with advisory session locks, plus a Celery
+and Redis upload worker), `docker-compose.gvisor.yml` (executor under gVisor), and Langfuse tracing
+when `LANGFUSE_*` is set. Postgres holds conversation state only; Qdrant stays the only vector
+database. Langfuse never receives prompt, evidence, or answer text unless
+`LANGFUSE_CAPTURE_CONTENT=true`, and it is never an input to an answer. Run `make integration-test`
+after changing state, locking, or the upload worker.

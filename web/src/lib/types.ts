@@ -211,7 +211,14 @@ export type TrustCaseResult = {
   error_code: string | null;
   trace_id: string | null;
   source_note: string;
+  // Scorer version 2 fields; absent from older scorecards.
+  verdict?: Verdict;
+  misattributed_claims?: string[];
+  failures?: string[];
+  repeat?: number;
 };
+
+export type Verdict = "passed" | "wrong_answer" | "unsupported" | "incomplete" | "false_refusal" | "error";
 
 export type Scorecard = {
   generated_at: string;
@@ -229,4 +236,11 @@ export type Scorecard = {
   wrong_answers: number;
   median_latency_seconds: number;
   results: TrustCaseResult[];
+  scorer_version?: number;
+  false_refusals?: number;
+  unsupported_answers?: number;
+  incomplete_answers?: number;
+  misattributed_claims?: number;
+  repeats?: number;
+  unstable_cases?: string[];
 };

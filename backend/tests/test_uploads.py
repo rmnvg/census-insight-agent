@@ -16,7 +16,7 @@ from backend.app.ingestion.models import (
 )
 from backend.app.ingestion.page_images import highlight_fragments, render_page_png
 from backend.app.ingestion.service import IngestionService
-from backend.app.ingestion.uploads import UploadError, UploadService
+from backend.app.ingestion.uploads import UploadError, UploadService, withdrawn_document_ids
 from backend.app.main import app
 
 PAGE_TEXT = "Kerala literacy rate 2011\nThe literacy rate of Kerala was 94.00 per cent."
@@ -193,6 +193,134 @@ def test_failed_processing_removes_source_and_points(
     assert removed == [job.document_id]
     assert not list((tmp_path / "data" / "source" / "pdf").glob("*.pdf"))
     assert not list((tmp_path / "data" / "manifests" / "uploads").glob("*.json"))
+
+
+class FlakyRemover:
+    """A point remover whose Qdrant is unreachable until `available` is set."""
+
+    def __init__(self) -> None:
+        self.available = False
+        self.removed: list[str] = []
+
+    def __call__(self, document_id: str) -> None:
+        if not self.available:
+            raise ConnectionError("Qdrant is unreachable")
+        self.removed.append(document_id)
+
+
+def flaky_service(
+    tmp_path: Path, remover: FlakyRemover, ingestion: FakeIngestion | None = None
+) -> UploadService:
+    fake = ingestion or FakeIngestion(raises=True)
+    return UploadService(
+        upload_settings(tmp_path),
+        ingestion_factory=lambda _: fake,  # type: ignore[arg-type,return-value]
+        point_remover=remover,
+    )
+
+
+def test_failed_cleanup_keeps_the_source_until_points_are_removed(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    remover = FlakyRemover()
+    uploads = flaky_service(tmp_path, remover)
+    job = stage(uploads)
+    pdf = data_root / "source" / "pdf" / f"{job.document_id}.pdf"
+    override = data_root / "manifests" / "uploads" / f"{job.document_id}.override.json"
+
+    done = asyncio.run(uploads.process(job.job_id))
+
+    # Points may still be indexed, so the authoritative PDF must still exist, and retrieval
+    # must already exclude the document.
+    assert done.status == "failed"
+    assert pdf.is_file() and override.is_file()
+    assert withdrawn_document_ids(data_root) == [job.document_id]
+    remover.available = True
+    uploads.finish_withdrawals()
+    assert remover.removed == [job.document_id]
+    assert not pdf.exists() and not override.exists()
+    assert withdrawn_document_ids(data_root) == []
+
+
+def test_restart_finishes_an_interrupted_withdrawal(tmp_path: Path) -> None:
+    remover = FlakyRemover()
+    uploads = flaky_service(tmp_path, remover)
+    job = stage(uploads)
+    asyncio.run(uploads.process(job.job_id))
+    assert withdrawn_document_ids(tmp_path / "data") == [job.document_id]
+
+    remover.available = True
+    flaky_service(tmp_path, remover)
+    assert remover.removed == [job.document_id]
+    assert withdrawn_document_ids(tmp_path / "data") == []
+    assert not list((tmp_path / "data" / "source" / "pdf").glob("*.pdf"))
+
+
+def test_reupload_waits_for_the_earlier_attempt_to_be_cleaned_up(tmp_path: Path) -> None:
+    remover = FlakyRemover()
+    uploads = flaky_service(tmp_path, remover)
+    content = pdf_bytes()
+    first = stage(uploads, content)
+    asyncio.run(uploads.process(first.job_id))
+
+    with pytest.raises(UploadError) as pending:
+        stage(uploads, content)
+    assert pending.value.status_code == 503
+
+    remover.available = True
+    second = stage(uploads, content)
+    assert second.document_id == first.document_id and second.status == "queued"
+    assert (tmp_path / "data" / "source" / "pdf" / f"{second.document_id}.pdf").is_file()
+    assert withdrawn_document_ids(tmp_path / "data") == []
+
+
+class ManifestThenFailIngestion(FakeIngestion):
+    """Fails after the generated manifest and index state were written, as a late error does."""
+
+    def __init__(self, checksum: str) -> None:
+        super().__init__()
+        self.checksum = checksum
+
+    def ingest(self, **kwargs: Any) -> IngestionReport:
+        document_id = kwargs["document_id"]
+        data_root = kwargs["source_dir"].parent
+        (data_root / "manifests" / "generated").mkdir(parents=True, exist_ok=True)
+        (data_root / "manifests" / "generated" / f"{document_id}.json").write_text(
+            DocumentManifest(
+                document_id=document_id,
+                title="Kerala",
+                region="Kerala",
+                pdf_path=f"source/pdf/{document_id}.pdf",
+                source_checksum=self.checksum,
+                page_count=2,
+                ingestion_version="1",
+                extraction_method=["pymupdf4llm_fallback"],
+                created_at=datetime.now(UTC),
+            ).model_dump_json()
+        )
+        (data_root / "processed" / f"{document_id}.json").write_text("{}")
+        (data_root / "processed" / "tables").mkdir(parents=True, exist_ok=True)
+        (data_root / "processed" / "tables" / f"{document_id}.json").write_text("{}")
+        result = DocumentIngestionResult(
+            document_id=document_id, pages=2, chunks=4, failures=["state write failed"]
+        )
+        return IngestionReport(documents=[result])
+
+
+def test_failed_processing_removes_the_generated_manifest(tmp_path: Path) -> None:
+    content = pdf_bytes()
+    uploads, removed = service(tmp_path)
+    checksum = stage(uploads, content).source_checksum
+    uploads, removed = service(tmp_path, ManifestThenFailIngestion(checksum))
+    # The restart above failed the first job; this is a fresh attempt.
+    job = stage(uploads, content)
+    done = asyncio.run(uploads.process(job.job_id))
+
+    assert done.status == "failed"
+    assert not list((tmp_path / "data" / "manifests" / "generated").glob("*.json"))
+    assert not (tmp_path / "data" / "processed" / f"{job.document_id}.json").exists()
+    assert not (tmp_path / "data" / "processed" / "tables" / f"{job.document_id}.json").exists()
+    # Without its manifest the failed document is neither listed nor a "duplicate".
+    assert stage(uploads, content).status == "queued"
 
 
 def test_interrupted_jobs_are_failed_on_restart(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ const RULES: [methods: string[], pattern: RegExp][] = [
   [["POST"], /^chat(\/stream)?$/],
   [["POST"], /^research\/stream$/],
   [["GET"], new RegExp(`^runs/${UUID}/trace$`)],
+  [["POST"], new RegExp(`^runs/${UUID}/feedback$`)],
   [["GET"], /^documents$/],
   [["GET"], /^evaluation\/scorecard$/],
   [["POST"], /^documents\/upload$/],

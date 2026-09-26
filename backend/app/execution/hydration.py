@@ -11,6 +11,7 @@ from backend.app.execution.contracts import (
     SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.tables.selection import ColumnSelection
 
 _HTML = re.compile(r"<[^>]+>")
 _MARKDOWN = re.compile(r"[*_`]+")
@@ -593,6 +594,83 @@ def hydrate_artifact_dataset(
         rows=rows,
         columns=["row_id", "label", "series", "value"],
         units={"value": sources[0].unit or ""},
+        source_records=sources,
+        requested_output=requested_output,
+    )
+
+
+def dataset_from_table_selection(
+    selection: ColumnSelection,
+    requirement: ArtifactDataRequirement,
+    evidence: list[RetrievedEvidence],
+    requested_output: str,
+) -> ArtifactDataset:
+    """Build a ranking dataset from every row of one verified table column, with no model.
+
+    The table store chose the column from the table's full header, so no row can be missing,
+    misread, or bound to a sibling column. Each row is still cited from its indexed chunk: the
+    quote is the chunk text through the row's line, as for a hydrated proposal row.
+    """
+    validate_trusted_artifact_evidence(evidence)
+    by_id = {item.chunk_id: item for item in evidence}
+    column = selection.column
+    if column.metric is None or column.year is None:
+        raise ProposalHydrationError("TABLE_COLUMN_UNDESCRIBED")
+    population = requirement.population_scope or selection.population_group or "persons"
+    residence = requirement.residence_scope or column.residence or "total"
+    rows: list[dict[str, object]] = []
+    sources: list[SourceRecord] = []
+    for index, record in enumerate(selection.records, 1):
+        item = by_id.get(record.chunk_id or "")
+        if item is None:
+            raise ProposalHydrationError("UNKNOWN_EVIDENCE_ID")
+        end = None
+        offset = 0
+        for line in item.text.splitlines(keepends=True):
+            offset += len(line)
+            if line.rstrip("\n") == record.line:
+                end = offset
+                break
+        if end is None:
+            raise ProposalHydrationError("TABLE_ROW_NOT_IN_EVIDENCE")
+        value = float(record.value)
+        row_id = f"row-{index}"
+        rows.append({"row_id": row_id, "label": record.entity, "series": "", "value": value})
+        sources.append(
+            SourceRecord(
+                source_record_id=f"source-{index}",
+                row_id=row_id,
+                field="value",
+                raw_value=record.raw_value,
+                normalized_numeric_value=value,
+                unit=column.unit,
+                metric=column.metric,
+                region=record.entity,
+                year=column.year,
+                population_scope=population,
+                residence_scope=residence,
+                document_title=item.document_title,
+                document_id=item.document_id,
+                page_number=item.page_number,
+                chunk_id=item.chunk_id,
+                exact_supporting_quote=item.text[:end].rstrip("\n"),
+                source_checksum=item.source_checksum,
+            )
+        )
+    # Name every non-default scope: the ranking sentence quotes this title, and "Literacy Rate"
+    # alone would pass off the female column as the whole population's.
+    group = selection.population_group
+    scopes = [
+        *([residence] if residence != "total" else []),
+        *([group] if group in {"males", "females"} else []),
+    ]
+    scope = f" ({', '.join(scopes)})" if scopes else ""
+    return ArtifactDataset(
+        title=f"{column.metric} by district in {selection.region}{scope}, {column.year}",
+        task_type="artifact_chart" if requirement.artifact_type == "chart" else "artifact_table",
+        rows=rows,
+        columns=["row_id", "label", "series", "value"],
+        units={"value": column.unit or ""},
         source_records=sources,
         requested_output=requested_output,
     )

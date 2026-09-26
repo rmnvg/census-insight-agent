@@ -1,5 +1,6 @@
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from qdrant_client import QdrantClient, models
@@ -30,11 +31,14 @@ class HybridRetrievalService:
         collection_name: str,
         dense_provider: VertexEmbeddingProvider,
         sparse_encoder: BM25SparseEncoder,
+        excluded_document_ids: Callable[[], list[str]] | None = None,
     ) -> None:
         self.client = client
         self.collection_name = collection_name
         self.dense_provider = dense_provider
         self.sparse_encoder = sparse_encoder
+        # Read on every search: withdrawn uploads must stop being retrievable immediately.
+        self.excluded_document_ids = excluded_document_ids or list
 
     def search(
         self,
@@ -63,9 +67,28 @@ class HybridRetrievalService:
         started = time.monotonic()
         if not query.strip():
             raise ValueError("Retrieval query must be non-empty")
+        excluded = self.excluded_document_ids()
+        if document_ids and excluded:
+            # Narrow the requested documents instead of pairing `must` and `must_not` on
+            # `document_id`: Qdrant 1.15 then returns the points the exclusion should drop.
+            document_ids = [item for item in document_ids if item not in excluded]
+            if not document_ids:
+                return RetrievalSearchResponse(
+                    evidence=[],
+                    evidence_sufficiency=self._sufficiency(query, []),
+                    debug=RetrievalDiagnostics(
+                        dense_candidates=[],
+                        sparse_candidates=[],
+                        fused_ranking=[],
+                        applied_filters={"excluded_document_ids": excluded},
+                        retrieval_time_ms=round((time.monotonic() - started) * 1000, 3),
+                    )
+                    if debug
+                    else None,
+                )
         dense = self.dense_provider.embed_query(query)
         sparse = self.sparse_encoder.embed_query(query)
-        query_filter = self._filter(document_ids, regions)
+        query_filter = self._filter(document_ids, regions, excluded)
         candidate_limit = max(top_k * 4, 20)
         prefetch = [
             models.Prefetch(
@@ -119,6 +142,7 @@ class HybridRetrievalService:
                     for key, value in {
                         "document_ids": document_ids,
                         "regions": regions,
+                        "excluded_document_ids": excluded,
                     }.items()
                     if value
                 },
@@ -157,7 +181,9 @@ class HybridRetrievalService:
         )
 
     @staticmethod
-    def _filter(document_ids: list[str] | None, regions: list[str] | None) -> models.Filter | None:
+    def _filter(
+        document_ids: list[str] | None, regions: list[str] | None, excluded: list[str]
+    ) -> models.Filter | None:
         conditions: list[models.Condition] = []
         if document_ids:
             conditions.append(
@@ -167,7 +193,14 @@ class HybridRetrievalService:
             conditions.append(
                 models.FieldCondition(key="region", match=models.MatchAny(any=regions))
             )
-        return models.Filter(must=conditions) if conditions else None
+        exclusions: list[models.Condition] = []
+        if excluded and not document_ids:
+            exclusions.append(
+                models.FieldCondition(key="document_id", match=models.MatchAny(any=excluded))
+            )
+        if not conditions and not exclusions:
+            return None
+        return models.Filter(must=conditions or None, must_not=exclusions or None)
 
     @staticmethod
     def _candidates(points: list[Any]) -> list[RetrievalCandidate]:
