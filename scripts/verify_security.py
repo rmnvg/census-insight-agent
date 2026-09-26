@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static, value-free audit of Compose trust-boundary controls."""
+"""Static, value-free audit of Compose trust-boundary controls, including the opt-in overlays."""
 
 import re
 from pathlib import Path
@@ -19,6 +19,45 @@ def _service_block(compose: str, service: str, next_service: str | None) -> str:
     following = re.search(r"\n(?:  [a-z][\w-]*:|[a-z][\w-]*:)", compose[start + 1 :])
     end = start + 1 + following.start() if following else len(compose)
     return compose[start:end]
+
+
+def _top_level_services(compose: str) -> list[str]:
+    services = compose.split("\nservices:\n", 1)[1] if "\nservices:\n" in compose else compose
+    services = re.split(r"(?m)^[a-z][\w-]*:", services, maxsplit=1)[0]
+    return re.findall(r"(?m)^  ([a-z][\w-]*):\n", services)
+
+
+def _scale_checks(compose: str) -> dict[str, bool]:
+    postgres = _service_block(compose, "postgres", None)
+    redis = _service_block(compose, "redis", None)
+    worker = _service_block(compose, "ingest-worker", None)
+    backend = _service_block(compose, "backend", None)
+    return {
+        "scale_state_stores_unpublished": "ports:" not in postgres and "ports:" not in redis,
+        "scale_state_stores_only_on_state_network": all(
+            block.split("networks:", 1)[1].split() == ["-", "state"] for block in (postgres, redis)
+        ),
+        "scale_state_network_internal": re.search(r"(?m)^  state:\n    internal: true$", compose)
+        is not None,
+        "scale_database_url_has_no_password": re.search(
+            r"STATE_DATABASE_URL:\s*\"?postgres(?:ql)?://[^\s:/@\"]+@", backend
+        )
+        is not None,
+        "scale_worker_minimal_mounts": all(
+            value not in worker
+            for value in ("/app/workspace", "execution-queue", "docker.sock", "frontend_api")
+        ),
+        "scale_executor_untouched": "executor" not in _top_level_services(compose),
+    }
+
+
+def _gvisor_checks(compose: str) -> dict[str, bool]:
+    executor = _service_block(compose, "executor", None)
+    settings = [line.strip() for line in executor.splitlines()[1:] if line.strip()]
+    return {
+        "gvisor_only_changes_executor_runtime": _top_level_services(compose) == ["executor"]
+        and settings == ["runtime: runsc"],
+    }
 
 
 def main() -> int:
@@ -46,12 +85,17 @@ def main() -> int:
         "executor_read_only": "read_only: true" in executor,
         "executor_capabilities_dropped": "cap_drop:\n      - ALL" in executor,
         "executor_no_credentials": "GOOGLE_" not in executor and "/var/secrets" not in executor,
+        "only_backend_gets_langfuse_keys": all(
+            "LANGFUSE_" not in block for block in (executor, web, frontend)
+        ),
         "executor_only_queue_mount": executor.count("source:") == 1
         and "./workspace/execution-queue" in executor,
         "backend_adc_read_only": "/var/secrets/google/adc.json" in backend
         and "read_only: true" in backend,
         "backend_no_docker_socket": "docker.sock" not in backend,
         "qdrant_storage_named_volume": "qdrant_data:/qdrant/storage" in compose,
+        **_scale_checks(Path("docker-compose.scale.yml").read_text(encoding="utf-8")),
+        **_gvisor_checks(Path("docker-compose.gvisor.yml").read_text(encoding="utf-8")),
     }
     for name, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'} {name}")

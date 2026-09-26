@@ -107,3 +107,76 @@ def test_unchanged_reingestion_skips_embedding_calls(tmp_path: Path, monkeypatch
     assert corrected.processed_documents == 1
     assert corrected.skipped_unchanged_documents == 0
     assert dense.calls == 2
+
+
+def test_ingestion_writes_a_table_store_bound_to_the_indexed_chunks(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    data_root = tmp_path / "data"
+    source = data_root / "source"
+    (source / "pdf").mkdir(parents=True)
+    (source / "markdown").mkdir()
+    (data_root / "manifests").mkdir()
+    (source / "pdf" / "sample.pdf").write_bytes(b"synthetic PDF identity")
+    settings = Settings.model_validate(
+        {"google_cloud_project": "test", "data_root": data_root, "gemini_embedding_dimension": 3}
+    )
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "tables_real_pages.json").read_text(encoding="utf-8")
+    )
+    [literacy] = [
+        page
+        for page in fixture["census-2011-karnataka-pca-highlights"]["pages"]
+        if page["page_number"] == 50
+    ]
+
+    def fake_mapping(**kwargs: Any) -> PageMappingResult:
+        page = DocumentPage(
+            document_id=str(kwargs["document_id"]),
+            page_number=1,
+            text=literacy["text"],
+            extraction_method="provided_markdown",
+            coverage_status="indexed_provided_markdown",
+        )
+        coverage = build_coverage_report(
+            page.document_id,
+            1,
+            [PageCoverageEntry(page_number=1, status="indexed_provided_markdown")],
+        )
+        return PageMappingResult(pages=[page], markdown_pages=[1], coverage=coverage)
+
+    class RecordingStore(FakeStore):
+        def upsert(self, chunks: Any, dense: Any, sparse: Any) -> None:
+            super().upsert(chunks, dense, sparse)
+            self.chunk_ids = {chunk.chunk_id for chunk in chunks}
+
+    monkeypatch.setattr("backend.app.ingestion.service.map_document_pages", fake_mapping)
+    store = RecordingStore()
+    service = IngestionService(
+        settings,
+        store=cast(Any, store),
+        dense_embedder=cast(Any, FakeDense()),
+        sparse_encoder=cast(Any, FakeSparse()),
+    )
+    first = service.ingest(source_dir=source)
+    [result] = first.documents
+    path = data_root / "processed" / "tables" / f"{result.document_id}.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    [table] = stored["tables"]
+    assert result.structured_tables == 1 and table["statement"] == "19"
+    assert {row["chunk_id"] for row in table["rows"]} <= store.chunk_ids
+    assert all(row["chunk_id"] for row in table["rows"])
+
+    # An unchanged document is not re-embedded, but its store is rebuilt.
+    path.unlink()
+    assert service.ingest(source_dir=source).skipped_unchanged_documents == 1
+    assert path.is_file()
+
+    # A failed extraction must not leave a store describing other chunks.
+    def broken(**kwargs: Any) -> Any:
+        raise RuntimeError("parser bug")
+
+    monkeypatch.setattr("backend.app.ingestion.service.extract_document_tables", broken)
+    again = service.ingest(source_dir=source)
+    assert again.documents[0].structured_tables == 0 and not again.failures
+    assert not path.exists()

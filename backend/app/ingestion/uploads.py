@@ -5,13 +5,21 @@ authoritative source file under `data/source/pdf/`, described by an override man
 `data/manifests/uploads/`, and then indexed by the exact same `IngestionService.ingest` path the
 CLI uses (PyMuPDF4LLM extraction, page-level provenance, checksum-bound chunks, dense + BM25
 vectors). Pages without a usable text layer are reported as failed mappings, never guessed.
+
+A failed upload is withdrawn before it is removed. A durable marker under
+`data/processed/uploads/withdrawn/` excludes the document from retrieval at once; its source PDF
+is deleted only after its Qdrant points are gone, so indexed evidence never outlives its
+authoritative source. A cleanup that cannot finish (Qdrant unreachable) is retried at startup and
+before each job.
 """
 
 import asyncio
-import contextlib
 import hashlib
+import json
+import logging
 import os
 import re
+import threading
 import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -31,6 +39,8 @@ from backend.app.ingestion.models import (
 )
 from backend.app.ingestion.service import IngestionService
 
+logger = logging.getLogger(__name__)
+
 UPLOAD_PREFIX = "upload-"
 _JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 _DOCUMENT_ID = re.compile(r"^upload-[a-z0-9-]{1,64}$")
@@ -43,6 +53,10 @@ class UploadError(ValueError):
     def __init__(self, message: str, status_code: int = 422) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+class TransientIngestionError(RuntimeError):
+    """Indexing raised; the source is kept so a durable worker can retry the job."""
 
 
 class UploadJob(BaseModel):
@@ -79,6 +93,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
     os.replace(temporary, path)
 
 
+def _withdrawn_dir(data_root: Path) -> Path:
+    return data_root / "processed" / "uploads" / "withdrawn"
+
+
+def withdrawn_document_ids(data_root: Path) -> list[str]:
+    """Uploaded documents whose failed indexing is not fully cleaned up; never retrieve them."""
+    directory = _withdrawn_dir(data_root)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path.stem for path in directory.glob("*.json") if _DOCUMENT_ID.fullmatch(path.stem)
+    )
+
+
 class UploadService:
     def __init__(
         self,
@@ -86,6 +114,7 @@ class UploadService:
         *,
         ingestion_factory: IngestionFactory = IngestionService.live,
         point_remover: PointRemover | None = None,
+        recover_interrupted: bool = True,
     ) -> None:
         self.settings = settings
         self.ingestion_factory = ingestion_factory
@@ -96,9 +125,16 @@ class UploadService:
         self.generated_dir = self.data_root / "manifests" / "generated"
         self.jobs_dir = self.data_root / "processed" / "uploads" / "jobs"
         self.reports_dir = self.data_root / "processed" / "uploads" / "reports"
+        self.withdrawn_dir = _withdrawn_dir(self.data_root)
         # Ingestion shares one embedding cache and one Qdrant collection; one job at a time.
         self._ingestion_lock = asyncio.Lock()
-        self._recover_interrupted_jobs()
+        # Staging runs outside the ingestion lock, and both may finish a withdrawal.
+        self._withdrawal_lock = threading.Lock()
+        # In-process jobs die with the API process. A durable worker queue owns its jobs and
+        # redelivers them after a crash, so the API must not fail them at startup.
+        if recover_interrupted:
+            self._recover_interrupted_jobs()
+        self.finish_withdrawals()
 
     # ----------------------------------------------------------------------------- staging
 
@@ -144,6 +180,14 @@ class UploadService:
             raise UploadError("This PDF is already being processed.", 409)
 
         document_id = f"{UPLOAD_PREFIX}{_slug(clean_title)}-{checksum[:10]}"
+        # A failed earlier attempt at this exact document writes to the same paths; its cleanup
+        # must finish first or it would delete the new source.
+        if not self._finish_withdrawal(document_id):
+            raise UploadError(
+                "An earlier attempt to index this PDF is still being cleaned up; "
+                "please try again shortly.",
+                503,
+            )
         # The stored filename is derived, never user-controlled.
         pdf_filename = f"{document_id}.pdf"
         _atomic_write(self.pdf_dir / pdf_filename, content)
@@ -178,27 +222,55 @@ class UploadService:
     # ----------------------------------------------------------------------------- processing
 
     async def process(self, job_id: str) -> UploadJob:
+        """Index a staged upload inside the API process (the default single-host mode)."""
         async with self._ingestion_lock:
-            job = self._require(job_id)
-            job = self._update(job, status="processing", detail="Extracting and indexing pages")
-            try:
-                report = await asyncio.to_thread(self._ingest, job.document_id)
-            except Exception as error:
-                await self._discard_failed(job.document_id)
-                return self._update(job, status="failed", detail=self._safe_failure(str(error)))
-            result = next(
-                (item for item in report.documents if item.document_id == job.document_id), None
-            )
-            if result is None or result.failures or result.chunks == 0:
-                await self._discard_failed(job.document_id)
-                reason = (
-                    result.failures[0]
-                    if result and result.failures
-                    else "No citation-safe text could be extracted. Scanned PDFs need OCR "
-                    "review before they can be indexed."
+            return await asyncio.to_thread(self.run_job, job_id)
+
+    def run_job(self, job_id: str, *, retry_on_error: bool = False) -> UploadJob:
+        """Index a staged upload. Safe to run again for the same job after a crash.
+
+        With `retry_on_error`, an exception keeps the source and raises
+        `TransientIngestionError` so the caller can retry; otherwise the job fails and every trace
+        of the document is removed. A document that indexes without error but yields no
+        citation-safe text fails permanently either way, because retrying cannot change that.
+        """
+        job = self._require(job_id)
+        if job.status in {"succeeded", "failed"}:
+            # A redelivered message for a finished job is a no-op, never a second ingestion.
+            return job
+        self.finish_withdrawals()
+        job = self._update(job, status="processing", detail="Extracting and indexing pages")
+        try:
+            report = self._ingest(job.document_id)
+        except Exception as error:
+            if retry_on_error:
+                self._update(
+                    job,
+                    status="queued",
+                    detail="Indexing hit an error and will be retried automatically.",
                 )
-                return self._update(job, status="failed", detail=self._safe_failure(reason))
-            return self._finish(job, result)
+                raise TransientIngestionError(self._safe_failure(str(error))) from error
+            self._discard_failed(job.document_id)
+            return self._update(job, status="failed", detail=self._safe_failure(str(error)))
+        result = next(
+            (item for item in report.documents if item.document_id == job.document_id), None
+        )
+        if result is None or result.failures or result.chunks == 0:
+            self._discard_failed(job.document_id)
+            reason = (
+                result.failures[0]
+                if result and result.failures
+                else "No citation-safe text could be extracted. Scanned PDFs need OCR "
+                "review before they can be indexed."
+            )
+            return self._update(job, status="failed", detail=self._safe_failure(reason))
+        return self._finish(job, result)
+
+    def fail(self, job_id: str, detail: str) -> UploadJob:
+        """Give up on a staged job (retries exhausted, or it could not be queued)."""
+        job = self._require(job_id)
+        self._discard_failed(job.document_id)
+        return self._update(job, status="failed", detail=self._safe_failure(detail))
 
     def _ingest(self, document_id: str) -> IngestionReport:
         service = self.ingestion_factory(self.settings)
@@ -267,6 +339,13 @@ class UploadService:
             raise UploadError("Only uploaded documents can be deleted.", 403)
         if not (self.override_dir / f"{document_id}.override.json").is_file():
             raise UploadError("Unknown document.", 404)
+        # Indexing may be running in another process (the durable worker), where this
+        # process's lock cannot reach; deleting underneath it would strand its points.
+        if any(
+            job.document_id == document_id and job.status in {"queued", "processing"}
+            for job in self.list_jobs(limit=1000)
+        ):
+            raise UploadError("This document is still being indexed; try again shortly.", 409)
         async with self._ingestion_lock:
             if self.point_remover is not None:
                 await asyncio.to_thread(self.point_remover, document_id)
@@ -277,19 +356,55 @@ class UploadService:
             for path in (
                 self.generated_dir / f"{document_id}.json",
                 self.data_root / "processed" / f"{document_id}.json",
+                self.data_root / "processed" / "tables" / f"{document_id}.json",
                 self.reports_dir / f"{document_id}.json",
             ):
                 path.unlink(missing_ok=True)
 
-    # ----------------------------------------------------------------------------- internals
+    # ----------------------------------------------------------------------------- withdrawal
 
-    async def _discard_failed(self, document_id: str) -> None:
-        # A failure after the Qdrant upsert must not leave retrievable chunks whose source PDF
-        # is about to be removed.
-        if self.point_remover is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(self.point_remover, document_id)
-        self._discard_source(document_id)
+    def finish_withdrawals(self) -> None:
+        """Retry every withdrawal whose cleanup could not finish earlier."""
+        for document_id in withdrawn_document_ids(self.data_root):
+            self._finish_withdrawal(document_id)
+
+    def _discard_failed(self, document_id: str) -> None:
+        # Record the withdrawal durably before touching anything: retrieval excludes the document
+        # from now on, and a restart finishes the cleanup if this attempt is interrupted.
+        _atomic_write(
+            self.withdrawn_dir / f"{document_id}.json",
+            json.dumps(
+                {"document_id": document_id, "withdrawn_at": datetime.now(UTC).isoformat()}
+            ).encode(),
+        )
+        self._finish_withdrawal(document_id)
+
+    def _finish_withdrawal(self, document_id: str) -> bool:
+        """Remove a withdrawn document's points, then its source. False while points remain."""
+        with self._withdrawal_lock:
+            marker = self.withdrawn_dir / f"{document_id}.json"
+            if not marker.is_file():
+                return True
+            # Derived files go first: they list the document in the library and would make a
+            # re-upload of the same PDF look like a duplicate.
+            for path in (
+                self.generated_dir / f"{document_id}.json",
+                self.data_root / "processed" / f"{document_id}.json",
+                self.data_root / "processed" / "tables" / f"{document_id}.json",
+            ):
+                path.unlink(missing_ok=True)
+            if self.point_remover is not None:
+                try:
+                    self.point_remover(document_id)
+                except Exception:
+                    # The authoritative PDF stays until its indexed evidence is gone.
+                    logger.warning("Removing points for withdrawn %s failed", document_id)
+                    return False
+            self._discard_source(document_id)
+            marker.unlink(missing_ok=True)
+            return True
+
+    # ----------------------------------------------------------------------------- internals
 
     def _discard_source(self, document_id: str) -> None:
         (self.pdf_dir / f"{document_id}.pdf").unlink(missing_ok=True)
@@ -324,10 +439,7 @@ class UploadService:
     def _recover_interrupted_jobs(self) -> None:
         for job in self.list_jobs(limit=1000):
             if job.status in {"queued", "processing"}:
-                if self.point_remover is not None:
-                    with contextlib.suppress(Exception):
-                        self.point_remover(job.document_id)
-                self._discard_source(job.document_id)
+                self._discard_failed(job.document_id)
                 self._update(
                     job,
                     status="failed",

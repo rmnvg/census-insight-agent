@@ -3,13 +3,11 @@ import logging
 import shutil
 import time
 from collections.abc import Awaitable, Callable
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Protocol, cast
 from uuid import uuid4
-from weakref import WeakValueDictionary
 
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import GraphRecursionError
 from qdrant_client import QdrantClient
 
@@ -34,7 +32,6 @@ from backend.app.agent.models import (
     SessionTranscript,
 )
 from backend.app.agent.persistence import (
-    SessionStore,
     TraceStore,
     safe_trace_details,
     validate_session_id,
@@ -46,9 +43,12 @@ from backend.app.agent.provider import (
     set_request_deadline,
 )
 from backend.app.agent.skills import SkillRegistry
+from backend.app.agent.state import build_state_backend
 from backend.app.agent.tools import AgentTools
 from backend.app.config import Settings, get_settings
 from backend.app.execution.client import ArtifactStore, ExecutionQueueClient
+from backend.app.ingestion.uploads import withdrawn_document_ids
+from backend.app.observability import TurnObservation, build_observability, callbacks_config
 from backend.app.providers.chat import get_chat_model
 from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.qdrant_store import QdrantStore
@@ -72,6 +72,10 @@ class UnknownSessionError(ValueError):
     pass
 
 
+class UnknownRunError(LookupError):
+    pass
+
+
 class AgentChatError(RuntimeError):
     def __init__(self, error: AgentOperationalError, session_id: str, run_id: str) -> None:
         super().__init__(error.message)
@@ -89,8 +93,9 @@ class AgentService:
     ) -> None:
         self.settings = settings
         self.model = model
-        self._session_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-        self.sessions = SessionStore(settings.workspace_root)
+        self.state = build_state_backend(settings)
+        self.sessions = self.state.sessions
+        self.observability = build_observability(settings)
         self.traces = TraceStore(settings.workspace_root)
         self.execution_queue = ExecutionQueueClient(settings.execution_queue_root)
         self.artifacts = ArtifactStore(settings.workspace_root, settings.execution_queue_root)
@@ -127,6 +132,7 @@ class AgentService:
                 resolved.sparse_embedding_model,
                 cache_dir=resolved.data_root / "processed" / "fastembed-cache",
             ),
+            excluded_document_ids=partial(withdrawn_document_ids, resolved.data_root),
         )
         tools = AgentTools(
             retrieval,
@@ -144,7 +150,11 @@ class AgentService:
         return cls(resolved, model, tools)
 
     async def initialize(self) -> None:
-        await self.sessions.initialize()
+        await self.state.initialize()
+
+    async def close(self) -> None:
+        await self.state.close()
+        self.observability.shutdown()
 
     async def create_session(self) -> SessionRecord:
         await self.initialize()
@@ -184,11 +194,10 @@ class AgentService:
         await self.initialize()
         if await self.sessions.get(session_id) is None:
             raise UnknownSessionError("Unknown session")
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self.state.session_lock(session_id):
             # Research sections live in hidden child sessions; they go with their chat.
             for owned in [*await self.sessions.children(session_id), session_id]:
-                async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
+                async with self.state.checkpointer() as saver:
                     await saver.adelete_thread(owned)
                 await self.sessions.delete(owned)
                 sessions_root = (self.settings.workspace_root / "sessions").resolve()
@@ -219,8 +228,7 @@ class AgentService:
         if planner is None:
             raise ValueError("Research planning is unavailable")
         resolved_planner = planner
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self.state.session_lock(session_id):
             await self.initialize()
             if await self.sessions.get(session_id) is None:
                 raise UnknownSessionError("Unknown session")
@@ -357,8 +365,7 @@ class AgentService:
     async def _isolated_turn(
         self, session_id: str, message: str, on_progress: ProgressCallback
     ) -> AgentResponse:
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self.state.session_lock(session_id):
             return await self._chat_turn(session_id, message, on_progress)
 
     async def get_context_status(self, session_id: str) -> SessionContextStatus:
@@ -367,7 +374,7 @@ class AgentService:
         if await self.sessions.get(session_id) is None:
             raise UnknownSessionError("Unknown session")
         history = []
-        async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
+        async with self.state.checkpointer() as saver:
             checkpoint_id = await self.sessions.get_checkpoint_id(session_id)
             if checkpoint_id is not None:
                 state = await self._checkpoint_state(saver, session_id, checkpoint_id)
@@ -388,10 +395,9 @@ class AgentService:
         on_progress: ProgressCallback | None = None,
     ) -> AgentResponse:
         validate_session_id(session_id)
-        # Compose runs one API process. Hold the lock through checkpoint and trace persistence;
-        # weak references release idle session locks without an ever-growing session registry.
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        # Hold the session lock through checkpoint and trace persistence. With Postgres state it
+        # is an advisory lock, so a turn on another replica waits for this one.
+        async with self.state.session_lock(session_id):
             if not message.strip():
                 raise ValueError("Message must be non-empty")
             await self.initialize()
@@ -454,6 +460,30 @@ class AgentService:
         if await self.sessions.get(session_id) is None:
             raise UnknownSessionError("Unknown session")
         run_id = str(uuid4())
+        with self.observability.turn(
+            session_id=session_id, run_id=run_id, question=message.strip()
+        ) as observation:
+            try:
+                response, refusal_reason = await self._observed_turn(
+                    session_id, message, run_id, on_progress, observation
+                )
+            except AgentChatError as chat_error:
+                observation.failed(chat_error.error.code)
+                raise
+            except Exception:
+                observation.failed("INTERNAL_ERROR")
+                raise
+            observation.answered(response, refusal_reason=refusal_reason)
+            return response
+
+    async def _observed_turn(
+        self,
+        session_id: str,
+        message: str,
+        run_id: str,
+        on_progress: ProgressCallback | None,
+        observation: TurnObservation,
+    ) -> tuple[AgentResponse, str | None]:
         request_started = time.monotonic()
         initial: AgentState = {
             "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
@@ -485,6 +515,7 @@ class AgentService:
             "trace_events": [],
             "calculations": [],
             "artifact_dataset": None,
+            "table_selection": None,
             "generated_code": None,
             "execution_request": None,
             "execution_result": None,
@@ -492,7 +523,7 @@ class AgentService:
             "artifact_attempt": 0,
             "artifact_errors": [],
         }
-        async with AsyncSqliteSaver.from_conn_string(str(self.sessions.database)) as saver:
+        async with self.state.checkpointer() as saver:
             graph = self.graph_factory.build(saver)
             checkpoint_id = await self.sessions.get_checkpoint_id(session_id)
             if checkpoint_id is None:
@@ -508,6 +539,7 @@ class AgentService:
             config = {
                 "configurable": configurable,
                 "recursion_limit": self.settings.agent_max_steps,
+                **callbacks_config(observation),
             }
             token = set_request_deadline(
                 request_started + self.settings.agent_request_timeout_seconds
@@ -572,7 +604,7 @@ class AgentService:
         )
         await self.sessions.touch(session_id)
         self.traces.write(trace)
-        return response
+        return response, trace.refusal_reason
 
     @staticmethod
     async def _run_graph(
@@ -689,6 +721,18 @@ class AgentService:
 
     def get_trace(self, run_id: str) -> RunTrace | None:
         return self.traces.read(run_id)
+
+    async def record_feedback(self, run_id: str, *, positive: bool) -> None:
+        trace = self.traces.read(run_id)
+        if trace is None:
+            raise UnknownRunError("Unknown run")
+        await asyncio.to_thread(
+            self.traces.write_feedback, trace.session_id, run_id, positive=positive
+        )
+        try:
+            self.observability.record_feedback(run_id, positive=positive)
+        except Exception:
+            logger.exception("Could not forward feedback to Langfuse")
 
 
 def _normalized_sections(plan: ResearchPlan) -> list[Any]:

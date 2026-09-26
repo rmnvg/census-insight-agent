@@ -3,9 +3,9 @@ import json
 import logging
 import mimetypes
 from collections.abc import AsyncIterator
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -22,7 +22,12 @@ from backend.app.agent.models import (
     SessionTitleUpdate,
     SessionTranscript,
 )
-from backend.app.agent.service import AgentChatError, UnknownSessionError, get_agent_service
+from backend.app.agent.service import (
+    AgentChatError,
+    UnknownRunError,
+    UnknownSessionError,
+    get_agent_service,
+)
 from backend.app.config import get_settings
 from backend.app.execution.client import EXECUTOR_HEARTBEAT_HEALTHY_SECONDS
 from backend.app.execution.contracts import ArtifactDescriptor, ArtifactListing, ExecutorHealth
@@ -37,7 +42,13 @@ from backend.app.ingestion.models import (
 )
 from backend.app.ingestion.page_images import page_count, render_page_png
 from backend.app.ingestion.service import IngestionService
-from backend.app.ingestion.uploads import UploadError, UploadJob, UploadService
+from backend.app.ingestion.uploads import (
+    UploadError,
+    UploadJob,
+    UploadService,
+    withdrawn_document_ids,
+)
+from backend.app.ingestion.worker import enqueue_upload
 from backend.app.providers.embeddings import VertexEmbeddingProvider
 from backend.app.retrieval.models import (
     DocumentSummary,
@@ -617,6 +628,22 @@ def run_trace(run_id: str) -> RunTrace:
     return trace
 
 
+class FeedbackRequest(BaseModel):
+    rating: Literal["up", "down"]
+
+
+@router.post("/runs/{run_id}/feedback", status_code=204, tags=["agent"])
+async def run_feedback(run_id: str, feedback: FeedbackRequest) -> Response:
+    """Rate an answer. Stored beside the run's trace and, when enabled, sent to Langfuse."""
+    try:
+        await get_agent_service().record_feedback(run_id, positive=feedback.rating == "up")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Invalid run ID") from error
+    except UnknownRunError as error:
+        raise HTTPException(status_code=404, detail="Unknown run") from error
+    return Response(status_code=204)
+
+
 class IngestRequest(BaseModel):
     source_dir: Path | None = None
     document_id: str | None = None
@@ -792,7 +819,10 @@ def document_coverage(document_id: str) -> DocumentCoverageSummary:
 def get_upload_service() -> UploadService:
     settings = get_settings()
     return UploadService(
-        settings, point_remover=lambda document_id: _store().delete_document(document_id)
+        settings,
+        point_remover=lambda document_id: _store().delete_document(document_id),
+        # With a durable worker, queued jobs belong to the queue, not to this process.
+        recover_interrupted=not settings.ingestion_broker_url,
     )
 
 
@@ -823,7 +853,16 @@ async def upload_document(
         )
     except UploadError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from error
-    background.add_task(uploads.process, job.job_id)
+    if not get_settings().ingestion_broker_url:
+        background.add_task(uploads.process, job.job_id)
+        return job
+    try:
+        await asyncio.to_thread(enqueue_upload, job.job_id)
+    except Exception as error:
+        await asyncio.to_thread(uploads.fail, job.job_id, "The indexing queue was unavailable.")
+        raise HTTPException(
+            status_code=503, detail="The indexing queue is unavailable; please retry."
+        ) from error
     return job
 
 
@@ -935,6 +974,7 @@ def _retrieval_service() -> HybridRetrievalService:
             settings.sparse_embedding_model,
             cache_dir=settings.data_root / "processed" / "fastembed-cache",
         ),
+        excluded_document_ids=partial(withdrawn_document_ids, settings.data_root),
     )
 
 

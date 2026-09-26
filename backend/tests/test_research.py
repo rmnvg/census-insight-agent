@@ -92,7 +92,7 @@ def test_deleting_a_chat_removes_its_research_sessions(tmp_path: Path) -> None:
     run(service.delete_session(session.session_id))
     for child in children:
         assert run(service.get_session(child)) is None
-    with sqlite3.connect(service.sessions.database) as connection:
+    with sqlite3.connect(service.settings.workspace_root / "checkpoints.sqlite") as connection:
         placeholders = ",".join("?" * len(children))
         remaining = connection.execute(
             f"SELECT COUNT(*) FROM checkpoints WHERE thread_id IN ({placeholders})",

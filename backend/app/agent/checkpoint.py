@@ -30,6 +30,7 @@ from backend.app.execution.contracts import (
     SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.tables.selection import ColumnSelection
 
 _PROVIDER_ERROR_MESSAGES = {
     "MODEL_SCHEMA_REJECTED": "The model could not accept the response schema for this step.",
@@ -75,6 +76,7 @@ def hydrate_agent_state(raw: AgentState | dict[str, Any]) -> AgentState:
         "draft_answer": DraftAnswer,
         "final_response": AgentResponse,
         "artifact_dataset": ArtifactDataset,
+        "table_selection": ColumnSelection,
         "ranking_winner": SourceRecord,
         "execution_request": ExecutionRequest,
         "execution_result": ExecutionResult,

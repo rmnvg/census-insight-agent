@@ -11,6 +11,7 @@ from qdrant_client import QdrantClient, models
 from backend.app.agent.skills import SkillRegistry
 from backend.app.agent.tools import AgentTools
 from backend.app.ingestion.models import ChunkMetadata, DocumentChunk
+from backend.app.ingestion.uploads import withdrawn_document_ids
 from backend.app.retrieval.models import RetrievedEvidence, SparseVectorData
 from backend.app.retrieval.qdrant_store import CollectionSchemaError, QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService, RetrievalProvenanceError
@@ -244,6 +245,71 @@ def test_source_checksum_survives_sibling_expansion(tmp_path: Path) -> None:
     expanded = asyncio.run(tools.expand_candidate_pages([candidate]))
     assert len(expanded) == 1
     assert expanded[0].source_checksum == checksum
+
+
+def test_withdrawn_documents_are_never_retrieved(tmp_path: Path) -> None:
+    client = QdrantClient(path=str(tmp_path / "withdrawn"))
+    store = make_store(client)
+    store.ensure_collection()
+    kept = make_chunk(
+        "2f46558a-89cf-44c2-8234-d74a9f96dcd0",
+        document_id="doc-a",
+        region="Kerala",
+        page_number=1,
+        text="Kerala literacy is 94.00",
+    )
+    withdrawn = make_chunk(
+        "2ff68f2d-d4c1-497c-b644-2e14e7203371",
+        document_id="upload-kerala-0123456789",
+        region="Kerala",
+        page_number=1,
+        text="Kerala literacy is 94.00",
+    )
+    store.upsert(
+        [kept, withdrawn],
+        [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        [SparseVectorData(indices=[1], values=[1.0])] * 2,
+    )
+    data_root = tmp_path / "data"
+    marker = data_root / "processed" / "uploads" / "withdrawn" / "upload-kerala-0123456789.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}", encoding="utf-8")
+    service = HybridRetrievalService(
+        client=client,
+        collection_name="test_collection",
+        dense_provider=cast(Any, DenseProvider()),
+        sparse_encoder=cast(Any, SparseEncoder()),
+        excluded_document_ids=lambda: withdrawn_document_ids(data_root),
+    )
+
+    for document_ids in (None, ["upload-kerala-0123456789"]):
+        response = service.search_response(
+            query="Kerala literacy",
+            document_ids=document_ids,
+            regions=None,
+            top_k=5,
+            debug=True,
+        )
+        assert "upload-kerala-0123456789" not in {item.document_id for item in response.evidence}
+        assert response.debug is not None
+        assert response.debug.applied_filters["excluded_document_ids"] == [
+            "upload-kerala-0123456789"
+        ]
+    tools = AgentTools(service, store, SkillRegistry(tmp_path / "skills"), data_root)
+    assert asyncio.run(tools.collect_summary_evidence("upload-kerala-0123456789")) == []
+    assert len(asyncio.run(tools.collect_summary_evidence("doc-a"))) == 1
+
+    # Once the cleanup finishes and the marker is gone, nothing is excluded any more.
+    marker.unlink()
+    response = service.search_response(
+        query="Kerala literacy", document_ids=None, regions=None, top_k=5, debug=True
+    )
+    assert {item.document_id for item in response.evidence} == {
+        "doc-a",
+        "upload-kerala-0123456789",
+    }
+    assert response.debug is not None
+    assert "excluded_document_ids" not in response.debug.applied_filters
 
 
 def test_list_documents_reads_generated_manifests_not_qdrant(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ describe("proxy allowlist", () => {
     ["POST", "chat/stream"],
     ["POST", "research/stream"],
     ["GET", `runs/${RUN}/trace`],
+    ["POST", `runs/${RUN}/feedback`],
     ["GET", "documents/census-2011-karnataka-pca-highlights/pages/50"],
     ["POST", "documents/upload"],
     ["GET", "documents/uploads/0123456789abcdef0123456789abcdef"],
@@ -38,6 +39,8 @@ describe("proxy allowlist", () => {
     ["GET", "documents/../manifests/pages/1"],
     ["POST", "documents/x/pages/1"],
     ["GET", "health//executor"],
+    ["GET", `runs/${RUN}/feedback`],
+    ["POST", "runs/not-a-run/feedback"],
   ])("blocks %s /%s", (method, path) => {
     expect(isAllowed(method, path)).toBe(false);
   });

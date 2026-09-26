@@ -555,3 +555,50 @@ def test_completeness_counts_only_tables_the_proposal_used() -> None:
     scoped = same_table_evidence([fragment, decadal], {fragment.chunk_id})
     assert [item.chunk_id for item in scoped] == [fragment.chunk_id]
     assert count_table_entity_rows(scoped) == count_table_entity_rows([fragment])
+
+
+class RankingDroppingResolver:
+    """Returns the resolver output recorded in live trace 1e8313d6 (a Deep Research section)."""
+
+    async def resolve(self, query: str, context: list[Any]) -> Any:
+        from backend.app.agent.models import ResolvedQuery
+
+        return ResolvedQuery(
+            query="What was the literacy rate of Odisha in 2011?",
+            task_type="artifact_table",
+            regions=["Odisha"],
+            artifact_requirement=ArtifactDataRequirement(
+                artifact_type="table",
+                metric="literacy rate",
+                year=2011,
+                regions=["Odisha"],
+                comparison=True,
+            ),
+        )
+
+
+def test_resolution_cannot_turn_a_classified_ranking_into_a_lookup(tmp_path: Path) -> None:
+    graph = AgentGraph(
+        RankingDroppingResolver(),  # type: ignore[arg-type]
+        FakeTools(SkillRegistry(tmp_path / "skills")),
+    )
+    classified = ArtifactDataRequirement(
+        artifact_type="table", metric="Literacy Rate", rank_all=True, rank_direction="max"
+    )
+    state = {
+        "user_query": "Which district of Odisha had the highest literacy rate?",
+        "task_type": "artifact_table",
+        "classification": TaskClassification(
+            task_type="artifact_table",
+            regions=["Odisha"],
+            artifact_requirement=classified,
+            reason="ranking",
+        ),
+        "messages": [],
+    }
+    result = run(graph.resolve_query(cast(AgentState, state)))
+    requirement = cast(ArtifactDataRequirement, result["artifact_requirement"])
+    assert (requirement.rank_all, requirement.rank_direction) == (True, "max")
+    planned = run(graph.plan(cast(AgentState, {**state, **result})))
+    final = cast(ArtifactDataRequirement, planned["artifact_requirement"])
+    assert (final.rank_all, final.regions, final.comparison) == (True, [], False)

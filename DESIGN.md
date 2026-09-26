@@ -6,10 +6,10 @@ The binding platform decisions are summarized in [docs/DECISIONS.md](docs/DECISI
 
 ### Submission hardening
 
-The supported deployment is one backend process with a local filesystem and local Docker Compose.
+The default deployment is one backend process with a local filesystem and local Docker Compose.
 Per-session locks serialize overlapping turns through checkpoint and trace persistence. Multiple API
-workers would require a shared session lock or optimistic checkpoint versioning; they are deliberately
-not enabled. Separate sessions can still run concurrently.
+workers need a shared session lock, which the opt-in Postgres mode provides (see "Production
+modes"). Separate sessions can still run concurrently.
 
 Numeric table quotes bind values to row labels and column headers. A semantic assessment must classify
 every source claim exactly once; missing or conflicting assessments trigger repair/refusal. These checks
@@ -29,7 +29,9 @@ The executor drains stdout and stderr into bounded buffers and kills the process
 A separate heartbeat remains current during execution. Linux enforces address-space limits plus the
 Docker memory limit. macOS development runs omit unsupported `RLIMIT_AS`; production execution uses
 the isolated Linux container. The single worker can queue jobs, but busy queues may exceed a request's
-bounded result deadline; another day would add queue admission control and stale-job recovery.
+bounded result deadline; another day would add queue admission control. At startup the worker fails
+any job a crashed predecessor left in `processing/` with `EXECUTION_INTERRUPTED` and deletes its
+unvalidated output. It does not re-run the job, which may be what killed the worker.
 
 ```mermaid
 flowchart LR
@@ -113,8 +115,12 @@ automatically rather than implying a match; highlighting works for text-layer up
    filename) with an override manifest in the git-ignored `data/manifests/uploads/`.
 4. `IngestionService.ingest` indexes it through the same path as the CLI: PyMuPDF4LLM extraction for
    a newly supplied PDF, page-bounded checksum-bound chunks, dense and BM25 vectors.
-5. A failed job removes its source file, manifest, and any points it upserted, so no retrievable
-   chunk ever outlives its source PDF. Jobs left running by a restart are marked failed at startup.
+5. A failed job is withdrawn before it is removed. A durable marker under
+   `data/processed/uploads/withdrawn/` excludes it from retrieval immediately. Its points are
+   removed next, and only then its source PDF and manifests, so no chunk ever outlives its source
+   PDF. If Qdrant is unreachable, the PDF stays and the cleanup is retried at startup and before
+   each job. In the default in-process mode, jobs left running by a restart are marked failed at
+   startup; the durable worker mode redelivers them instead (see "Production modes").
 
 Pages without a text layer become `failed_page_mapping` and are excluded, never OCR-guessed. A PDF
 with no extractable text fails with that explanation. Only uploaded documents can be deleted over
@@ -146,19 +152,49 @@ exports the brief as Markdown or a print-ready page with one global, deduplicate
 ## Trust scorecard
 
 `evals/trust_benchmark.json` holds questions whose answers were verified by hand against the
-source tables, including traps (the Scheduled Tribes and Scheduled Castes tables, a 2021 census
-that does not exist). `scripts/trust_benchmark.py --allow-paid-calls` asks each one through the
-live API and scores it with `backend/app/trust.py`. The scorer is deliberately independent of
-the agent's own validation code, so it audits the agent rather than trusting it:
+source tables. `scripts/trust_benchmark.py --allow-paid-calls` asks each one through the live
+API and scores it with `backend/app/trust.py`, which is deliberately independent of the agent's
+own validation code, so it audits the agent rather than trusting it.
 
-- every expected value, district, and artifact type must be present;
-- every numeric claim must appear verbatim in one of its own cited quotes;
-- every derived value must recompute from its operands;
-- a question outside the corpus must be refused with no numbers.
+**Ground truth is facts, not numbers.** Each expected answer is a tuple: region, metric, year,
+residence, population group, value (for example Odisha, sex ratio, 2011, urban, all persons,
+932). A fact is satisfied only by a claim whose own fields state that slot and value. The first
+version of the scorer matched expected numbers anywhere in the answer and labels anywhere in the
+text. Replaying real recorded answers with deliberate corruptions showed it passed all four of
+these: swapped region labels, a rural value stated as the total, a 2011 value labelled 2001, and
+a value moved to another region's row. The current scorer fails all four.
 
-Transient provider errors get one retry, and the attempt count is reported. `GET
-/evaluation/scorecard` serves the latest local run, else the copy shipped in `evals/`, and the
-UI renders it at `/trust` with a one-click live re-ask per case.
+**Provenance is checked independently.** `backend/app/trust_provenance.py` parses each cited
+quote's Markdown table on its own: it forward-fills the header rows into column paths such as
+`Literacy Rate / 2011 / Total`, finds the row labelled with the claim's region, and locates the
+value's column. A value must sit on its region's row, in a column whose headers (and statement
+context, such as "(FEMALES)") agree with the claim's year, residence, and group. On a recorded
+live run, 126 of 127 numeric claims resolved to a specific row and column; the other matched a
+prose sentence naming the region.
+
+**Every answer gets one verdict.**
+
+- `wrong_answer`: a claim states a verified slot with another value, a derived value does not
+  recompute, or a must-refuse question was answered with numbers.
+- `unsupported`: a value is not on its region's row, or the quote's headers contradict the claim.
+- `incomplete`: nothing wrong, but a fact, computed value, or artifact is missing.
+- `false_refusal`: an answerable question was declined, or answered with no numbers (only a
+  clarifying question). Declining is the safe failure and is reported apart from wrong answers.
+- `error`: an operational failure.
+
+**The cases probe association, not just recall:** wrong-year columns (2001 figures beside 2011
+ones), residence columns (urban vs rural vs total), swapped labels in a comparison (where Madhya
+Pradesh's child sex ratio equals its urban sex ratio), subgroup tables (Scheduled Tribes and
+Castes), multi-turn follow-ups that name neither region nor metric, a complete district ranking
+the agent is known to struggle with, and questions that must be refused.
+
+`--repeat N` asks every case N times, and the scorecard lists cases whose runs disagreed.
+`--responses-out` records every raw response, so `scripts/rescore_trust_benchmark.py` can
+re-score a run for free after a scorer change. Two recorded live runs are test fixtures:
+`backend/tests/test_trust.py` requires the real answers to pass and each corruption of them to
+get the right verdict. Transient provider errors get one retry, and the attempt count is
+reported. `GET /evaluation/scorecard` serves the latest local run, else the copy shipped in
+`evals/`, and the UI renders it at `/trust` with verdicts and a one-click live re-ask per case.
 
 ## Statement titles and population subgroups
 
@@ -343,8 +379,8 @@ Qdrant points by evidence ID, verifies provenance, and rebuilds exact citations 
 
 ### Memory and persistence boundaries
 
-- `AsyncSqliteSaver` stores short-term graph checkpoints in `workspace/checkpoints.sqlite`, keyed by
-  the validated application session ID. When history exceeds the configured threshold, older turns
+- `AsyncSqliteSaver` stores short-term graph checkpoints in `workspace/checkpoints.sqlite` (or
+  `AsyncPostgresSaver` in Postgres mode), keyed by the validated application session ID. When history exceeds the configured threshold, older turns
   are summarized only for preferences, open references, and intent, then removed; source facts are
   deliberately not promoted into memory.
 - `workspace/sessions/{session_id}/traces/` stores safe operational events and future artifacts. It
@@ -470,7 +506,9 @@ container-runtime, resource-accounting, and static-analysis limitations remain.
 
 A question naming no specific target — "which district had the highest sex ratio in Madhya
 Pradesh?" — is classified as `artifact_table` with an empty `regions` list and
-`artifact_requirement.rank_all=true`/`rank_direction`. It deliberately reuses the existing
+`artifact_requirement.rank_all=true`/`rank_direction`. The query resolver rewrites the question,
+but it cannot drop a ranking the classifier found. Rankings resolve against the structured table
+store first (see "Structured tables" below). Otherwise the request reuses the existing
 artifact pipeline rather than adding a parallel task type: retrieval switches from per-target
 search to a full-document table scan (`collect_metric_table_rows`), evidence assessment becomes
 deterministic (a full-table scan needs no per-target LLM relevance judgment), and the same
@@ -509,6 +547,153 @@ left `population_scope` unset for a ranking request; a ranking request that does
 ("highest female literacy rate") still has it fully verified against the table, unchanged from
 ordinary chart/table requests.
 
+### Structured tables
+
+The proposal path above rebuilds each cell's meaning from chunk fragments, and the chunker keeps
+only a table's first header row on later fragments. Literacy tables put 2001 and 2011, each with
+Total/Rural/Urban, under one "Literacy Rate" header, so later fragments could not say which column
+a value came from, and literacy rankings failed closed. Rankings now resolve against a structured
+table store first (`backend/app/tables/`); the proposal path remains only as the fallback.
+
+- **Extraction.** At ingestion, every table with a printed column-number row ("1 | 2 | 3 ...") is
+  parsed from the whole Markdown table on the indexed pages. Graph data transcribed from images
+  has no such row and is skipped. A blank header cell continues the cell to its left, but only
+  under the same parent header, so each column resolves to a metric, year or period, residence,
+  population group, and unit. A table takes its title from its "Statement N" heading or paragraph.
+  That context ends at the next heading or at a Graph, Map, or Annexure paragraph, so a later
+  table never inherits a statement's title. The title contributes the population group
+  ("(Persons)") and subgroups (Scheduled Castes, Scheduled Tribes, children).
+- **Binding.** A row is usable only when its exact Markdown line occurs in exactly one indexed
+  chunk on its page. That chunk is what the answer cites; the store is derived JSON in
+  `data/processed/tables/`, never evidence itself, and Qdrant stays the only vector store. On the
+  bundled corpus all 5,586 rows of 151 tables bind.
+- **Selection.** A column matches when its metric names exactly the requested metric (ignoring
+  stop words, years, and units), its table covers exactly the requested subgroups, and its year,
+  residence, and population group agree. Defaults are 2011, total, and persons. Several matches
+  are accepted only when they hold identical values (Odisha prints its first two chapters twice).
+  A blank or uncitable district row, or a malformed row, refuses the column.
+- **Query time.** The agent re-reads every cited chunk from Qdrant and requires the same document,
+  page, and source checksum, with the row's line still in its text. Otherwise the store is stale,
+  and the request falls back to scanning chunks. The dataset is built from every district row
+  with no model call, and `validate_dataset` checks it like any other.
+
+The layer only serves district rankings so far. Lookups, comparisons, and charts still bind values
+through hydration, and a statement split across pages is joined only when its header repeats.
+
+`make build-tables` builds stores for a collection indexed before they existed. It re-derives
+pages from the source files and binds rows to the chunks already in Qdrant, with no model calls.
+
+## Production modes
+
+The default deployment is deliberately single-host. Each production concern is an opt-in mode
+that leaves the default unchanged and keeps every trust rule above.
+
+### Shared conversation state (Postgres)
+
+`STATE_DATABASE_URL` switches `backend/app/agent/state.py` from SQLite to
+`backend/app/agent/postgres_state.py`. LangGraph checkpoints use `AsyncPostgresSaver`; sessions and
+display transcripts use the same schema as SQLite (`app_messages.payload` is JSONB and cascades
+with its session). Replacing the checkpointer alone would not have made the API stateless. The
+per-session turn lock was an in-process `asyncio.Lock`, so two replicas could run overlapping
+turns on one session, and both would extend the same stale checkpoint.
+
+- **Session lock.** A two-key Postgres advisory lock (`pg_advisory_lock(namespace, hash)`), held on
+  a dedicated connection for the whole turn. If a replica dies mid-turn, Postgres ends its
+  connection and releases the lock, so a crash cannot wedge a session. Lock connections have
+  their own pool, so long turns cannot starve checkpoint queries. A hash collision only
+  serializes two sessions; it never lets two turns share one.
+- **Migrations.** Replicas that start together take a migration advisory lock. They poll with
+  `pg_try_advisory_lock` instead of blocking in `pg_advisory_lock`. The integration test for
+  concurrent startup found a real deadlock. LangGraph's migrations run
+  `CREATE INDEX CONCURRENTLY`, which waits for every open transaction, and a replica blocked in
+  `pg_advisory_lock` is one. The cycle runs through the application, so Postgres cannot detect
+  it.
+- **Verified.** `backend/tests/test_postgres_state.py` runs two `AgentService` instances against a
+  real server: memory written by one replica is used by the other, and overlapping turns on two
+  replicas serialize. Removing the lock makes that test fail with one surviving turn instead of
+  two. Live, a question answered by one replica was followed up on the other. Both containers were
+  then recreated, and the session's validated memory and transcript were intact.
+- **Limits.** Traces, artifacts, and the executor queue stay on the shared workspace volume, which
+  is correct for replicas on one host; across hosts they need object storage. Switching modes does
+  not migrate existing SQLite history.
+
+### Durable upload indexing (Celery, Redis)
+
+In-process upload jobs never blocked the event loop: extraction and embedding already ran in a
+worker thread. The real gaps were that a restart failed any job in progress and that indexing
+shared a CPU with the API. `INGESTION_BROKER_URL` makes the API stage and validate exactly as
+before, then enqueue the job to `backend/app/ingestion/worker.py`, which runs the same
+`UploadService.run_job`.
+
+- **Delivery.** `acks_late` with `task_reject_on_worker_lost`: a job is acknowledged only when it
+  finishes. A worker killed mid-job leaves the message unacknowledged, and Redis redelivers it
+  after the visibility timeout. Redis uses append-only persistence, so queued work survives a
+  Redis restart.
+- **Idempotency.** Deterministic point IDs make a rerun an upsert, and a redelivered message for a
+  finished job is a no-op.
+- **Retries.** An exception while indexing requeues the job with exponential backoff and keeps the
+  source PDF. Only the final attempt fails the job and removes its source and points. A PDF that
+  indexes cleanly but yields no citation-safe text fails immediately: retrying cannot change that.
+- **Concurrency.** The worker runs one job at a time (shared embedding cache and collection).
+  Deleting a document whose job is queued or running returns 409 in both modes, because the
+  API's lock cannot reach another process.
+- **Verified.** Live, a 60-page upload was killed mid-index with `SIGKILL`. The same task was
+  redelivered after the visibility timeout and completed with exactly 60 points: no duplicates
+  from the partial first attempt. After deleting the test uploads, the collection returned to its
+  canonical 2,058 points.
+
+Celery was chosen because indexing is synchronous code (PyMuPDF and batch embedding) and Celery's
+acknowledgement and redelivery semantics are mature. On GCP, Cloud Tasks or Pub/Sub would remove
+Redis from the stack.
+
+### Executor under gVisor
+
+`docker-compose.gvisor.yml` changes one thing: the executor's runtime becomes `runsc`. gVisor is a
+user-space kernel, not a VM. The sandbox's system calls are served by gVisor's Sentry, so a kernel
+exploit from generated code has to break gVisor before it reaches the host kernel. Every existing
+control still applies. The executor already polls its queue directory, and the handoff below
+confirms it sees files the backend writes from outside the sandbox.
+`verify_executor_runtime.py --expect-gvisor` adds a kernel check to the in-sandbox isolation
+checks.
+
+This was verified on a real Linux Docker daemon with `runsc` (release 20260921.0). All isolation
+checks and all six offline cases passed inside the sandbox, and a full queue handoff from the
+backend image produced a validated artifact. The CI job `gvisor-executor` repeats this on every
+push.
+
+The same Linux run found an older bug that Docker Desktop hides. `queue-init` changed the queue
+root to the executor's UID before creating its subdirectories. It keeps only `CHOWN` and
+`FOWNER`, so it could then no longer enter that directory, and a fresh Linux checkout never got a
+working queue. It now takes the root back, prepares the children, and hands the root over last.
+That also makes restarts work. A microVM per job (Firecracker or Kata Containers) remains the
+next step for hostile multi-tenant load.
+
+### Observability and evaluation history (Langfuse)
+
+With `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY` set,
+`backend/app/observability.py` records:
+
+- one trace per agent turn, grouped by session, with outcome, refusal reason, claim and citation
+  counts, and an `answer_status` score;
+- one generation per Gemini call, via a small `langchain-core` callback handler rather than the
+  `langchain`-dependent integration, with the graph node, model, token usage (including reasoning
+  tokens), latency, and error type.
+
+Prompts, evidence, and answers are not sent unless `LANGFUSE_CAPTURE_CONTENT=true`, matching the
+local trace contract. A monitoring failure never fails a turn.
+
+- **Feedback.** Thumbs up/down in the UI (`POST /runs/{run_id}/feedback`) is stored beside the
+  run's trace and sent as a `user_feedback` score. The Langfuse trace ID derives from the run ID,
+  so no mapping is stored.
+- **Evaluation history.** `scripts/publish_trust_scorecard.py` (no model calls) records a trust
+  scorecard as a Langfuse dataset experiment. Each benchmark case is a dataset item with its
+  hand-verified expectation. Each case gets pass, outcome, ungrounded-claim, and latency scores,
+  and the run gets answer accuracy, refusal precision and recall, grounded-claim rate, and
+  latency percentiles, so model and prompt changes can be compared run by run.
+- **No LLM judge.** Scores come from the independent checks in `backend/app/trust.py`. An LLM judge
+  never decides numeric grounding; the hard part of scaling the benchmark stays writing verified
+  ground truth, not scoring it.
+
 ## Tradeoffs, alternatives, and intentionally skipped work
 
 Qdrant was selected as the single vector database because named dense/sparse vectors, payload filters, and server-side RRF keep one provenance-aware retrieval boundary. A relational vector extension would reduce services but would require recreating hybrid-ranking and payload contracts. Vertex Gemini keeps model traffic within GCP and ADC; the tradeoff is cloud configuration and paid live evaluation. LangGraph makes node transitions, retries, checkpointing, and failed-run traces explicit at the cost of more typed state conversion than a linear chain.
@@ -528,6 +713,6 @@ OpenAI-compatible free-credit provider (Groq, Nebius, or NVIDIA NIM all support 
 move dense embeddings to a local FastEmbed model — already a dependency for the sparse/BM25 side —
 removing the GCP dependency for retrieval entirely without touching Qdrant, RRF, or citation logic.
 
-Filesystem queueing is intentionally simple and observable for a single-host evaluation. A durable broker would improve horizontal scaling, leases, and backpressure but would add operational surface without strengthening source provenance. SQLite is suitable for short-term single-deployment memory, not multi-region concurrent persistence. Administrative ingestion remains synchronous and explicit; no background crawler, automatic source mutation, raw-OCR ingestion, hidden model fallback, or automatic destructive collection migration was built.
+Filesystem queueing is intentionally simple and observable for a single-host evaluation. A durable broker would improve horizontal scaling, leases, and backpressure but would add operational surface without strengthening source provenance. SQLite is suitable for short-term single-deployment memory, not multi-region concurrent persistence. Administrative ingestion remains synchronous and explicit through the CLI. User uploads run as in-process background jobs on the same ingestion path and are not retried after a restart. No background crawler, automatic source mutation, raw-OCR ingestion, hidden model fallback, or automatic destructive collection migration was built.
 
-With another day, the priorities would be microVM-grade executor isolation, URL-restorable UI sessions, streamed non-sensitive progress, a durable job broker, authenticated/TLS service edges, layout-aware visual extraction followed by human verification, and a licensed corpus distribution or snapshot workflow. None should weaken exact citation spans or the physical-page contract.
+Several items once on this list are now built: URL-restorable sessions and streamed progress (see "Next.js UI boundary"), and shared Postgres state, a durable upload worker, gVisor executor isolation, and evaluation history (see "Production modes"). The remaining priorities are authenticated/TLS service edges, a microVM per executor job, object storage for multi-host deployments, a broker for the executor queue, layout-aware visual extraction followed by human verification, and a licensed corpus distribution or snapshot workflow. None should weaken exact citation spans or the physical-page contract.

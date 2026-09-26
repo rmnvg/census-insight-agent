@@ -88,6 +88,7 @@ More: [district ranking with the winner highlighted](docs/screenshots/14-ranking
 - [Verification and evaluation](#verification-and-evaluation)
 - [API and traces](#api-and-traces)
 - [Troubleshooting](#troubleshooting)
+- [Production modes](#production-modes)
 - [Repository layout](#repository-layout)
 - [Further reading](#further-reading)
 
@@ -95,26 +96,41 @@ More: [district ranking with the winner highlighted](docs/screenshots/14-ranking
 
 ## Measured trust
 
-A benchmark of 18 questions with answers verified by hand against the source tables, run live
-through the API and scored independently of the agent's own validation code
+A benchmark of 26 questions with answers verified by hand against the source tables, each asked
+twice through the live API and scored independently of the agent's own validation code
 ([`backend/app/trust.py`](backend/app/trust.py), cases in
-[`evals/trust_benchmark.json`](evals/trust_benchmark.json)):
+[`evals/trust_benchmark.json`](evals/trust_benchmark.json)). Ground truth is facts, not loose
+numbers: for example (Odisha, sex ratio, 2011, urban, all persons, 932). Every number must also be
+found on its region's row, in the right column, of the quote it cites.
 
-| Check | Result |
+| Check (52 live answers) | Result |
 |---|---|
-| Correct answers (lookups, comparisons, district rankings, charts) | **14 / 14** |
-| Correct refusals (GDP, unemployment, cricket, a 2021 census that doesn't exist) | **4 / 4** |
-| Numbers that don't appear in their own cited quote | **0** of 132 claims checked |
-| Derived values that don't recompute | **0** |
 | Wrong answers shown | **0** |
-| Median latency per question | 26 s |
+| Numbers not on their region's row and column in their cited quote | **0** of 236 claims checked |
+| Correct refusals (GDP, unemployment, cricket, a 2021 census) | **8 / 8** |
+| Correct answers | **37 / 44** |
+| Unnecessary refusals (the safe failure) | 4 |
+| Operational errors | 3 |
+| Median latency per question | 20 s |
 
-The cases include deliberate traps. The Scheduled Tribes (990) and Scheduled Castes (987) tables
-sit next to the real state figures (973, 979), and a trap passes only if the agent never presents
-the subgroup value as the state's. This is one live run on 2026-09-24 with `gemini-2.5-flash`; model
-outputs vary between runs. Reproduce it with `make trust-benchmark` (billable), and see it in the
-app at `/trust`. Known gaps, such as district rankings by literacy rate, are in
-[FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md).
+The cases are built to catch misattribution, not just recall:
+
+- a 2001 figure next to the 2011 one;
+- urban versus rural versus total columns;
+- a comparison where Madhya Pradesh's child sex ratio equals its urban sex ratio;
+- the Scheduled Tribes and Castes tables beside the state figures;
+- follow-ups that name neither region nor metric;
+- a complete district ranking the agent is known to struggle with.
+
+The misses are honest limitations, not wrong answers. In that run the agent declined questions about
+2001, failed closed on district literacy rankings, and three cases gave different outcomes on their
+two runs. District rankings now read from structured tables: re-running the four ranking cases
+twice passed 8 of 8, with a median of 5.8 seconds. All are listed in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md). A replay of real answers with
+deliberate corruptions (swapped regions, a neighbouring column, a wrong year) shows the scorer
+catches each one; the previous version passed all four.
+
+This is one run on 2026-09-26 with `gemini-2.5-flash`. Reproduce it with `make trust-benchmark`
+(billable) and see it in the app at `/trust`.
 
 ## What makes this different
 
@@ -331,6 +347,15 @@ Initial ingestion invokes billable Vertex embeddings. A fresh `docker compose up
 services but cannot answer corpus questions until the assignment files are supplied and
 initialization is approved.
 
+Ingestion also writes each document's structured table store. For a collection indexed before
+table stores existed, build them from the indexed chunks with no model calls:
+
+```shell
+docker compose run --rm backend uv run --frozen python -m backend.app.tables.cli
+```
+
+Without a store, district rankings fall back to scanning chunks.
+
 ## Run and review
 
 ```shell
@@ -381,10 +406,12 @@ sandbox such as microVM isolation.
 
 ## Verification and evaluation
 
-A [GitHub Actions workflow](.github/workflows/ci.yml) runs the full offline gate — format, lint,
-type check, all 390 Python tests, an offline UI smoke test, a Compose trust-boundary audit, a
-git-history secret scan, and a build (never a run) of each service's Docker image — on every push,
-with no billable calls. Badge at the top of this file reflects the current `main` branch.
+A [GitHub Actions workflow](.github/workflows/ci.yml) runs the full offline gate on every push,
+with no billable calls: format, lint, type check, all 418 Python tests (including the Postgres and
+Redis integration tests), an offline UI smoke test, a Compose trust-boundary audit that covers
+both overlays, a git-history secret scan, and a build (never a run) of each service's Docker
+image. A second job runs the executor under gVisor. Badge at the top of this file reflects the
+current `main` branch.
 
 Run the same gate locally:
 
@@ -458,6 +485,7 @@ trace view shows allowlisted operational fields only. Files under `workspace/` a
 | `POST /documents/upload` · `GET /documents/uploads/{job_id}` | Upload a PDF (202 + background job) and poll it |
 | `DELETE /documents/{id}` | Remove an uploaded document and its vectors (bundled corpus is protected) |
 | `POST /research/stream` | Deep research: `plan`, per-section `progress`/`section_done`, then the saved report |
+| `POST /runs/{run_id}/feedback` | Rate an answer `up` or `down`; stored beside its trace and sent to Langfuse when enabled |
 | `GET /evaluation/scorecard` | Latest trust benchmark run (local, else the copy in `evals/`) |
 | `GET /documents/{id}/pages/{n}?highlight=…` | Render a physical PDF page, highlighting the quote where the PDF has a text layer |
 
@@ -474,10 +502,29 @@ trace view shows allowlisted operational fields only. Files under `workspace/` a
 Known limitations: excluded visual-page content, progress streaming by graph step rather than by
 token (answers are only released after citation validation), scanned or vector-text uploads cannot
 be indexed without OCR review, quote highlighting is unavailable for the bundled PDFs (they have no
-text layer), loopback-only services without user authentication, and development-grade executor
-isolation. See [DESIGN.md](DESIGN.md) and
+text layer), loopback-only services without user authentication, and shared-kernel executor
+isolation unless the gVisor mode is on. See [DESIGN.md](DESIGN.md) and
 [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md) for the full, honest accounting — including inputs where
-this system degrades, why, and what a real fix looks like.
+this system degrades, why, and what a real fix looks like. [Production modes](#production-modes)
+covers the opt-in scaled, sandboxed, and observed deployments.
+
+## Production modes
+
+The default `docker compose up` is deliberately a single host: one API process, SQLite state, and
+in-process upload indexing. Each production concern is an opt-in mode that keeps every trust
+guarantee above, and each was verified live against the real stack. Details and failure
+behavior are in [DESIGN.md](DESIGN.md#production-modes).
+
+| Mode | Turn it on | What it changes | How it was verified |
+|---|---|---|---|
+| Stateless API replicas | `make up-scale` (needs `POSTGRES_PASSWORD`) | Checkpoints, sessions, and transcripts move to Postgres (`AsyncPostgresSaver`). The per-session lock becomes a Postgres advisory lock, so a turn on one replica waits for an in-flight turn on another, and a crashed replica cannot wedge a session. | A question answered on replica :8000 was followed up on :8001, then both containers were replaced with state intact. Integration tests run two replicas against real Postgres; they fail if the lock is removed. |
+| Durable upload worker | Same overlay | Uploads are indexed by a Celery worker (Redis broker, append-only persistence) outside the API. Late acknowledgement redelivers a job whose worker died, and transient errors retry with backoff. | A 60-page upload was killed mid-index with `SIGKILL`; Redis redelivered it and it finished with exactly 60 points, no duplicates. |
+| gVisor executor | `make up-gvisor` (Linux with `runsc`) | Generated code runs on gVisor's user-space kernel instead of the host kernel, with every existing control still in place. | Isolation checks, all offline cases, and a full queue handoff pass under `runsc`. The CI job `gvisor-executor` repeats this on every push. |
+| Langfuse observability | `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | One trace per turn, grouped by session. Every Gemini call is a generation with token usage and latency. Answers get thumbs up/down scores, and trust scorecards become experiment runs with refusal precision and recall. Prompts and answers stay local unless `LANGFUSE_CAPTURE_CONTENT=true`. | Checked against a self-hosted Langfuse 4.46 server, plus unit tests against the exact spans the SDK exports. |
+
+`make integration-test` runs the Postgres and real-Redis tests against throwaway containers, and
+CI runs them on every push. Still open: an authenticated gateway with TLS, a microVM per executor
+job (Firecracker or Kata Containers), and object storage so replicas can span hosts.
 
 ## Repository layout
 

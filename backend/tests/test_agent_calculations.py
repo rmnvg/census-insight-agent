@@ -209,6 +209,77 @@ def test_count_comparison_never_says_percent_and_prunes_non_supporting_citations
     }
 
 
+def test_per_residence_comparisons_each_match_their_own_calculation() -> None:
+    """Regression from a live cross-replica follow-up (2026-09-26): "How does that compare with
+    Madhya Pradesh?" after Odisha's sex ratio.
+
+    The model's draft was right: total, rural, and urban values for both states and three
+    correct differences. All three calculations cite the same two table chunks, and the validator
+    paired every derived claim with the first calculation whose evidence it cited, the total one.
+    The rural and urban differences were rejected as altered, and the repair lost a target, so a
+    correct comparison was refused.
+    """
+    evidence = live_chunks()
+    values = {
+        "Madhya Pradesh": {"total": 931.0, "rural": 936.0, "urban": 918.0},
+        "Odisha": {"total": 979.0, "rural": 989.0, "urban": 932.0},
+    }
+    chunk = {"Madhya Pradesh": MP_TABLE, "Odisha": ODISHA_SECOND}
+    claims = [
+        DraftClaim(
+            claim_id=f"{region}-{scope}",
+            text=f"In 2011, the {scope} sex ratio in {region} was {value:g} per 1000 males.",
+            evidence_ids=[chunk[region]],
+            metric="Sex Ratio",
+            region=region,
+            year=2011,
+            residence_scope=scope,
+            value=value,
+            unit="count",
+        )
+        for region, scopes in values.items()
+        for scope, value in scopes.items()
+    ]
+    calculations = []
+    for scope in ("total", "rural", "urban"):
+        calculation = validated_calculation(
+            "How does that compare with Madhya Pradesh?",
+            CalculationRequest(
+                description=f"Compare the {scope} sex ratio of Odisha and Madhya Pradesh.",
+                operation="difference",
+                values=[values["Odisha"][scope], values["Madhya Pradesh"][scope]],
+                evidence_ids=[ODISHA_SECOND, MP_TABLE],
+            ),
+            evidence,
+        )
+        assert calculation is not None
+        calculations.append(calculation)
+    draft = add_deterministic_derived_claims(
+        DraftAnswer(answer_markdown="ignored", claims=claims), calculations
+    )
+    derived = [claim for claim in draft.claims if claim.derivation is not None]
+    assert [claim.text for claim in derived] == [
+        "Odisha is higher than Madhya Pradesh by 48.",
+        "In rural areas, Odisha is higher than Madhya Pradesh by 53.",
+        "In urban areas, Odisha is higher than Madhya Pradesh by 14.",
+    ]
+
+    result = validate_and_materialize_citations(draft, evidence, calculations)
+    assert result.valid, result.errors
+
+    # Matching by operands never lets a derived claim through with a value no calculation has.
+    forged = draft.model_copy(
+        update={
+            "claims": [
+                *draft.claims[:-1],
+                draft.claims[-1].model_copy(update={"value": 15.0}),
+            ]
+        }
+    )
+    invalid = validate_and_materialize_citations(forged, evidence, calculations)
+    assert "INVALID_DERIVATION" in invalid.error_codes
+
+
 def test_claim_with_no_supporting_citation_still_fails() -> None:
     evidence = [
         ratio_evidence("mp-prose", "Madhya Pradesh", "The sex ratio of the state has improved."),

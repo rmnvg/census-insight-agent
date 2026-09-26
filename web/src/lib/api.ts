@@ -68,6 +68,8 @@ export const api = {
     request<SessionRecord>(`sessions/${id}`, { method: "PATCH", ...json({ title }) }),
   deleteSession: (id: string) => request<void>(`sessions/${id}`, { method: "DELETE" }),
   trace: (runId: string) => request<RunTrace>(`runs/${runId}/trace`),
+  feedback: (runId: string, rating: "up" | "down") =>
+    request<void>(`runs/${runId}/feedback`, { method: "POST", ...json({ rating }) }),
   documents: () => request<DocumentSummary[]>("documents"),
   scorecard: () => request<Scorecard>("evaluation/scorecard"),
   coverage: (id: string) => request<CoverageSummary>(`documents/${encodeURIComponent(id)}/coverage`),

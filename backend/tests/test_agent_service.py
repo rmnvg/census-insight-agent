@@ -515,7 +515,9 @@ def test_strict_new_checkpoint_uses_json_safe_application_values_and_memory_surv
     assert not any("unregistered" in str(item.message).casefold() for item in caught)
 
     async def latest_values() -> dict[str, Any]:
-        async with AsyncSqliteSaver.from_conn_string(str(service.sessions.database)) as saver:
+        async with AsyncSqliteSaver.from_conn_string(
+            str(service.settings.workspace_root / "checkpoints.sqlite")
+        ) as saver:
             async for item in saver.alist(
                 {"configurable": {"thread_id": session.session_id}}, limit=1
             ):

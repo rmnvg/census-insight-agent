@@ -11,6 +11,30 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_PASSWORD: ci-only-postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s
+          --health-retries 12
+      redis:
+        image: redis:7.4.6-alpine@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s
+          --health-retries 12
+      qdrant:
+        image: qdrant/qdrant:v1.15.4@sha256:6ac4807063bbecddca0250bfbcff52acf18c22263b904d12919349e6d0a408f1
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "bash -c '</dev/tcp/127.0.0.1/6333'" --health-interval 5s
+          --health-timeout 3s --health-retries 12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,13 +47,24 @@ jobs:
         run: uv sync --frozen --all-extras
       - name: Offline checks
         run: make check
+        env:
+          # Runs the Postgres-state, real-Redis worker, and Qdrant-server tests that `make check`
+          # skips locally.
+          TEST_POSTGRES_URL: postgresql://postgres@localhost:5432/postgres
+          PGPASSWORD: ci-only-postgres
+          TEST_REDIS_URL: redis://localhost:6379/0
+          TEST_QDRANT_URL: http://localhost:6333
       - name: Git-history secret scan
         run: make secret-scan
       - name: Validate Compose configuration
         env:
           GOOGLE_CLOUD_PROJECT: offline-ci
           GOOGLE_CREDENTIALS_HOST_PATH: /tmp/offline-ci-adc.json
-        run: docker compose config --quiet
+          POSTGRES_PASSWORD: offline-ci
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.scale.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.gvisor.yml config --quiet
       # Build (never run) each service image. This needs no credentials — only `docker compose up`
       # does — and catches Dockerfile/dependency-group breakage (e.g. a package silently missing
       # from an extra) that `make check`'s host-venv tests, which install `--all-extras` together,
@@ -42,6 +77,50 @@ jobs:
         run: docker build -f web/Dockerfile -t census-web-ci .
       - name: Build executor image
         run: docker build -f executor/Dockerfile -t census-executor-ci .
+
+  # Runs the untrusted-code executor under gVisor (docker-compose.gvisor.yml) on a real Linux host:
+  # the isolation self-checks and offline smoke cases inside the sandbox, then a full queue handoff
+  # from the backend image. Needs no credentials; nothing here calls a model.
+  gvisor-executor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOOGLE_CLOUD_PROJECT: offline-ci
+      GOOGLE_CREDENTIALS_HOST_PATH: /tmp/offline-ci-adc.json
+      COMPOSE_FILE: docker-compose.yml:docker-compose.gvisor.yml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gVisor and register the runsc runtime
+        env:
+          # Pinned release; the tarball carries runsc, the containerd shim, and the gvisor-bin/
+          # sidecars runsc now loads from next to itself.
+          GVISOR_RELEASE: "20260921.0"
+        run: |
+          set -eu
+          url="https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$(uname -m)"
+          cd "$(mktemp -d)"
+          wget -q "$url/gvisor.tar.bz2" "$url/gvisor.tar.bz2.sha512"
+          sha512sum -c gvisor.tar.bz2.sha512
+          tar -xjf gvisor.tar.bz2
+          sudo cp -r runsc containerd-shim-runsc-v1 gvisor-bin /usr/local/bin/
+          sudo chmod -R a+rx /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 \
+            /usr/local/bin/gvisor-bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | grep -q runsc
+      - name: Start the executor under runsc
+        run: |
+          touch "$GOOGLE_CREDENTIALS_HOST_PATH"
+          mkdir -p workspace/execution-queue
+          docker compose up --build --detach --wait executor
+          test "$(docker inspect --format '{{.HostConfig.Runtime}}' "$(docker compose ps -q executor)")" = runsc
+      - name: Isolation checks and offline cases inside the gVisor sandbox
+        run: docker compose exec -T executor python scripts/verify_executor_runtime.py --expect-gvisor
+      - name: Queue handoff from the backend image to the gVisor executor
+        run: docker compose run --rm --no-deps backend python scripts/smoke_executor_handoff.py
+      - name: Executor logs
+        if: failure()
+        run: docker compose logs executor queue-init
 
   web:
     runs-on: ubuntu-latest

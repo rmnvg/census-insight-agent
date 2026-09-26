@@ -10,12 +10,15 @@ import {
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { answerIsClaims, snippetPreview, stripDownloadLinks, stripSourcesSection } from "@/lib/answer";
+import { api } from "@/lib/api";
 import { suggestFollowUps } from "@/lib/followups";
 import { citationNumbers, describeDerivation, orderedCitations } from "@/lib/trace";
 import type { ApiError, ChatResponse, Citation, Claim } from "@/lib/types";
@@ -170,6 +173,7 @@ export function AssistantMessage({
             {copied ? "Copied" : "Copy"}
           </button>
           <TracePanel runId={response.trace_id} />
+          <Feedback runId={response.trace_id} />
         </div>
 
         {onFollowUp && !embedded && <FollowUps response={response} regions={libraryRegions} onPick={onFollowUp} />}
@@ -263,6 +267,50 @@ function StatusBadge({ response }: { response: ChatResponse }) {
     <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-600/20 dark:bg-emerald-950/40 dark:text-emerald-300">
       <ShieldCheck className="size-3.5" />
       Verified against {sources} source{sources === 1 ? "" : "s"}
+    </span>
+  );
+}
+
+function Feedback({ runId }: { runId: string }) {
+  const [rating, setRating] = useState<"up" | "down" | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  const rate = async (value: "up" | "down") => {
+    const previous = rating;
+    setRating(value);
+    setFailed(false);
+    try {
+      await api.feedback(runId, value);
+    } catch {
+      setRating(previous);
+      setFailed(true);
+    }
+  };
+
+  const button = (value: "up" | "down", label: string) => {
+    const Icon = value === "up" ? ThumbsUp : ThumbsDown;
+    const active = rating === value;
+    return (
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={active}
+        title={label}
+        onClick={() => rate(value)}
+        className={`rounded-md px-1.5 py-1 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
+          active ? "text-teal-700 dark:text-teal-400" : ""
+        }`}
+      >
+        <Icon className="size-3.5" fill={active ? "currentColor" : "none"} />
+      </button>
+    );
+  };
+
+  return (
+    <span className="flex items-center" role="group" aria-label="Rate this answer">
+      {button("up", "Good answer")}
+      {button("down", "Bad answer")}
+      {failed && <span className="px-1 text-xs text-red-600">Not saved</span>}
     </span>
   );
 }

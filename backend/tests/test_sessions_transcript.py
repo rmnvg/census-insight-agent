@@ -56,7 +56,7 @@ def test_transcript_is_display_only_and_memory_survives_its_removal(tmp_path: Pa
     service, tools = build(tmp_path, model)
     session = run(service.create_session())
     run(service.chat(session.session_id, "What is Karnataka literacy?"))
-    with sqlite3.connect(service.sessions.database) as connection:
+    with sqlite3.connect(service.settings.workspace_root / "checkpoints.sqlite") as connection:
         connection.execute("DELETE FROM app_messages")
 
     follow_up = run(service.chat(session.session_id, "How does that compare?"))
@@ -115,7 +115,7 @@ def test_rename_and_delete_remove_every_session_record(tmp_path: Path) -> None:
     assert run(service.get_session(session.session_id)) is None
     assert service.get_trace(response.trace_id) is None
     assert not session_dir.exists()
-    with sqlite3.connect(service.sessions.database) as connection:
+    with sqlite3.connect(service.settings.workspace_root / "checkpoints.sqlite") as connection:
         remaining = connection.execute(
             "SELECT COUNT(*) FROM checkpoints WHERE thread_id = ?", (session.session_id,)
         ).fetchone()[0]

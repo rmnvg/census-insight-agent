@@ -1,10 +1,11 @@
 "use client";
 
-import { Check, CircleSlash, Gauge, Loader2, Play, ShieldCheck, Target, X } from "lucide-react";
+import { Check, CircleSlash, Gauge, Hand, Loader2, Play, ShieldCheck, Target, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, ApiRequestError } from "@/lib/api";
-import type { Scorecard, TrustCaseResult } from "@/lib/types";
+import { failureReasons, VERDICT_LABEL, verdictOf } from "@/lib/trust";
+import type { Scorecard, TrustCaseResult, Verdict } from "@/lib/types";
 
 import { useChat } from "./chat-provider";
 
@@ -14,6 +15,15 @@ const CATEGORY_LABEL: Record<TrustCaseResult["category"], string> = {
   ranking: "District ranking",
   chart: "Chart",
   refusal: "Must refuse",
+};
+
+const VERDICT_STYLE: Record<Verdict, string> = {
+  passed: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300",
+  wrong_answer: "bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-300",
+  unsupported: "bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-300",
+  incomplete: "bg-amber-50 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300",
+  false_refusal: "bg-amber-50 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300",
+  error: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
 };
 
 export function TrustView() {
@@ -48,14 +58,16 @@ export function TrustView() {
         {card && (
           <>
             <p className="mt-2 text-xs text-zinc-400">
-              Run {new Date(card.generated_at).toLocaleString()} · {card.model} · {card.cases_total} live questions
+              Run {new Date(card.generated_at).toLocaleString()} · {card.model} · {card.cases_total} live answers
+              {(card.repeats ?? 1) > 1 && ` (every question asked ${card.repeats} times)`}
+              {card.unstable_cases && card.unstable_cases.length > 0 && ` · unstable: ${card.unstable_cases.join(", ")}`}
             </p>
-            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <Tile
                 icon={Target}
                 label="Correct answers"
                 value={`${card.answerable_passed}/${card.answerable_total}`}
-                hint="Expected values, labels and artifacts all present"
+                hint="Every verified fact stated with the right region, year and scope"
               />
               <Tile
                 icon={CircleSlash}
@@ -65,7 +77,7 @@ export function TrustView() {
               />
               <Tile
                 icon={ShieldCheck}
-                label="Numbers not in their own citation"
+                label="Numbers not on their source row"
                 value={String(card.ungrounded_claims)}
                 hint={`Across ${card.claims_checked} claims checked`}
                 good={card.ungrounded_claims === 0}
@@ -77,13 +89,19 @@ export function TrustView() {
                 hint={`Median ${card.median_latency_seconds} s per question`}
                 good={card.wrong_answers === 0}
               />
+              <Tile
+                icon={Hand}
+                label="Unnecessary refusals"
+                value={String(card.false_refusals ?? card.results.filter((r) => verdictOf(r) === "false_refusal").length)}
+                hint="Answerable questions declined: the safe failure"
+              />
             </div>
 
             <section className="mt-6 grid gap-3 rounded-xl border border-zinc-200 p-4 text-sm text-zinc-600 md:grid-cols-2 dark:border-zinc-800 dark:text-zinc-300">
-              <Method label="Grounded numbers">Every numeric claim must appear verbatim in one of its own cited source quotes.</Method>
+              <Method label="Verified facts">Each hand-verified fact (region, year, residence, group, value) must be stated by one claim. A claim for that same slot with any other value is a wrong answer.</Method>
+              <Method label="Independent provenance">Every number must sit on its region’s row in one of its own cited quotes, in a column whose headers agree with the claim’s year and scope.</Method>
               <Method label="Honest arithmetic">Every derived value (for example a sex-ratio gap) is recomputed from its operands.</Method>
-              <Method label="Correct answers">The hand-verified value, district and artifact type must all be present.</Method>
-              <Method label="Refusals">Questions outside the corpus must be declined with no numbers at all.</Method>
+              <Method label="Refusals">Questions outside the corpus must be declined with no numbers. Declining an answerable question is counted separately.</Method>
             </section>
 
             <div className="mt-6 overflow-x-auto rounded-xl ring-1 ring-zinc-200 dark:ring-zinc-800">
@@ -99,19 +117,20 @@ export function TrustView() {
                 </thead>
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {card.results.map((result) => (
-                    <tr key={result.case_id} className="align-top">
+                    <tr key={`${result.case_id}-${result.repeat ?? 1}`} className="align-top">
                       <td className="px-3 py-2.5">
                         <span
                           className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
-                            result.passed
-                              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
-                              : "bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-300"
+                            VERDICT_STYLE[verdictOf(result)]
                           }`}
                         >
                           {result.passed ? <Check className="size-3" /> : <X className="size-3" />}
-                          {result.passed ? "Pass" : "Fail"}
+                          {VERDICT_LABEL[verdictOf(result)]}
                         </span>
-                        <p className="mt-1 text-[11px] text-zinc-400">{CATEGORY_LABEL[result.category]}</p>
+                        <p className="mt-1 text-[11px] text-zinc-400">
+                          {CATEGORY_LABEL[result.category]}
+                          {(card.repeats ?? 1) > 1 && ` · run ${result.repeat ?? 1}`}
+                        </p>
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="text-zinc-800 dark:text-zinc-200">{result.question}</p>
@@ -122,9 +141,14 @@ export function TrustView() {
                               ? "Refused"
                               : result.answer_excerpt}
                         </p>
-                        {!result.passed && result.missing.length > 0 && (
-                          <p className="mt-0.5 text-xs text-red-600 dark:text-red-400">Missing: {result.missing.join(", ")}</p>
-                        )}
+                        {!result.passed &&
+                          failureReasons(result)
+                            .slice(0, 2)
+                            .map((reason) => (
+                              <p key={reason} className="mt-0.5 text-xs text-red-600 dark:text-red-400">
+                                {reason}
+                              </p>
+                            ))}
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="font-mono text-xs text-zinc-700 dark:text-zinc-300">{result.expected}</p>
