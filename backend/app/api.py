@@ -396,23 +396,23 @@ async def chat(request: ChatRequest) -> AgentResponse | JSONResponse:
 
 # Human-readable progress labels for LangGraph nodes, shown while a turn is running.
 PROGRESS_LABELS: dict[str, str] = {
-    "load_memory": "Loading validated conversation memory",
+    "load_memory": "Reading earlier verified answers",
     "classify_task": "Understanding the question",
-    "resolve_query": "Resolving follow-up references",
-    "plan": "Planning retrieval",
-    "load_skill": "Loading task skill",
+    "resolve_query": "Connecting your follow-up to the earlier question",
+    "plan": "Planning which sources to check",
+    "load_skill": "Preparing the requested analysis",
     "call_tools": "Searching the Census reports",
-    "assess_evidence": "Assessing evidence relevance",
+    "assess_evidence": "Checking that the sources support your question",
     "synthesize": "Drafting a cited answer",
-    "prepare_artifact": "Hydrating verified data for the artifact",
-    "generate_artifact_code": "Writing chart/table code",
-    "execute_artifact": "Running code in the isolated executor",
-    "inspect_artifact": "Inspecting generated artifact",
-    "repair_artifact": "Repairing artifact code",
+    "prepare_artifact": "Checking chart and table values against their sources",
+    "generate_artifact_code": "Preparing your chart or table",
+    "execute_artifact": "Building your chart or table",
+    "inspect_artifact": "Checking the generated output",
+    "repair_artifact": "Correcting the generated output",
     "validate_citations": "Validating every citation against the source",
     "repair": "Repairing an unsupported claim",
     "graceful_response": "Preparing a safe response",
-    "persist_result": "Saving validated memory",
+    "persist_result": "Saving your answer and its sources",
 }
 _SSE_KEEPALIVE_SECONDS = 15.0
 # Turns keep running after a client disconnects so their result still lands in the transcript.

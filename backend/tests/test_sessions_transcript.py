@@ -155,7 +155,7 @@ def test_http_session_endpoints_and_streamed_chat(
     events = _events(streamed.text)
     assert events[0][0] == "started"
     progress = [data for name, data in events if name == "progress"]
-    assert progress[0] == {"node": "load_memory", "label": "Loading validated conversation memory"}
+    assert progress[0] == {"node": "load_memory", "label": "Reading earlier verified answers"}
     name, result = events[-1]
     assert name == "result" and result["answer"] and result["citations"]
 

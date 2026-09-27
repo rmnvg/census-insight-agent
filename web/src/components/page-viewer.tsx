@@ -10,7 +10,7 @@ import type { Citation } from "@/lib/types";
 import { Dialog } from "./dialog";
 
 /** Shows the authoritative PDF page behind a citation, with the quoted text highlighted. */
-export function PageViewer({ citation, onClose }: { citation: Citation; onClose: () => void }) {
+export function PageViewer({ citation, onClose, selectionLabel }: { citation: Citation; onClose: () => void; selectionLabel?: string }) {
   const [page, setPage] = useState(citation.page_number);
   const [pageCount, setPageCount] = useState<number | null>(null);
   const [loaded, setLoaded] = useState<{
@@ -79,6 +79,13 @@ export function PageViewer({ citation, onClose }: { citation: Citation; onClose:
           )}
         </div>
         <aside className="space-y-4 border-t border-zinc-200 p-4 text-sm md:border-l md:border-t-0 dark:border-zinc-800">
+          {selectionLabel && (
+            <div className="rounded-lg border border-teal-600/20 bg-teal-50 p-3 dark:bg-teal-950/40">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-teal-700 dark:text-teal-400">Selected chart value</p>
+              <p className="mt-1 font-semibold text-teal-950 dark:text-teal-100">{selectionLabel}</p>
+              <p className="mt-1 text-xs text-teal-700 dark:text-teal-300">Source: physical page {citation.page_number}</p>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <button
               type="button"

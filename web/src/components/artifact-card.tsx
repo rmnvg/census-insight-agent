@@ -14,13 +14,14 @@ import { ProvenanceChart } from "./provenance-chart";
 type View = "interactive" | "image" | "table";
 type Loaded = { rows: string[][]; manifest: SourceManifest | null } | "error" | null;
 
-export function ArtifactCard({ artifact }: { artifact: Artifact }) {
+export function ArtifactCard({ artifact, onSelectSource }: { artifact: Artifact; onSelectSource?: (citation: Citation) => void }) {
   const chart = artifact.artifact_type === "chart";
   const url = (filename: string) => artifactFileUrl(artifact.session_id, artifact.artifact_id, filename);
   const dataFile = chart ? "plotted-data.csv" : "table.csv";
   const [loaded, setLoaded] = useState<Loaded>(null);
   const [chosen, setChosen] = useState<View | null>(null);
   const [viewing, setViewing] = useState<Citation | null>(null);
+  const [selected, setSelected] = useState<SourceRecord | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -51,7 +52,15 @@ export function ArtifactCard({ artifact }: { artifact: Artifact }) {
   const views: View[] = chart ? ["interactive", "image", "table"] : model ? ["interactive", "table"] : ["table"];
   const defaultView: View = model ? "interactive" : chart ? "image" : "table";
   const view = chosen ?? defaultView;
-  const open = (record: SourceRecord) => setViewing(recordToCitation(record));
+  const open = (record: SourceRecord) => {
+    const citation = recordToCitation(record);
+    setSelected(record);
+    setViewing(citation);
+    onSelectSource?.(citation);
+  };
+  const selectedLabel = selected
+    ? [selected.region, `${selected.raw_value}${selected.unit ? ` ${selected.unit}` : ""}`, selected.year].filter(Boolean).join(" · ")
+    : undefined;
   const downloads = chart
     ? [
         ["chart.png", "PNG"],
@@ -99,7 +108,7 @@ export function ArtifactCard({ artifact }: { artifact: Artifact }) {
           <Loader2 className="mx-auto size-5 animate-spin text-zinc-400" />
         ) : view === "interactive" && model ? (
           <>
-            <ProvenanceChart model={model} title={artifact.title} onOpenSource={open} />
+            <ProvenanceChart model={model} title={artifact.title} onOpenSource={open} selectedRowId={selected?.row_id} />
             <p className="mt-3 text-[11px] text-zinc-500">
               Every bar is a verified source cell. Hover for its page, click to open the original PDF.
             </p>
@@ -108,6 +117,14 @@ export function ArtifactCard({ artifact }: { artifact: Artifact }) {
           <DataTable rows={loaded.rows} manifest={loaded.manifest} onOpenSource={open} />
         )}
       </div>
+      {selected && (
+        <button type="button" onClick={() => open(selected)}
+          className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-teal-600/20 bg-teal-50 px-3.5 py-3 text-left text-xs text-teal-900 hover:bg-teal-100 dark:bg-teal-950/40 dark:text-teal-200 dark:hover:bg-teal-950/60">
+          <span className="font-semibold">Selected source</span>
+          <span>{selectedLabel}</span>
+          <span className="ml-auto font-medium">View PDF · p. {selected.page_number} →</span>
+        </button>
+      )}
       <footer className="flex flex-wrap items-center gap-1.5 border-t border-zinc-200 px-3.5 py-2 text-xs dark:border-zinc-800">
         <span className="mr-1 text-zinc-500">Generated in the network-isolated executor from verified cells</span>
         <span className="ml-auto" />
@@ -130,7 +147,7 @@ export function ArtifactCard({ artifact }: { artifact: Artifact }) {
           <FileJson className="size-3" /> Provenance
         </a>
       </footer>
-      {viewing && <PageViewer key={viewing.citation_id} citation={viewing} onClose={() => setViewing(null)} />}
+      {viewing && <PageViewer key={viewing.citation_id} citation={viewing} selectionLabel={selectedLabel} onClose={() => setViewing(null)} />}
     </section>
   );
 }
