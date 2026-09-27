@@ -23,10 +23,12 @@ export function ProvenanceChart({
   model,
   title,
   onOpenSource,
+  selectedRowId,
 }: {
   model: ChartModel;
   title: string;
   onOpenSource: (record: SourceRecord) => void;
+  selectedRowId?: string;
 }) {
   const [hover, setHover] = useState<Hover | null>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -88,13 +90,15 @@ export function ProvenanceChart({
                   ))}
                   {rows.map((row) => {
                     const width = Math.max(0.5, (row.value / axisMax) * 100);
-                    const muted = model.ranking && !winner;
+                    const selected = selectedRowId === row.rowId;
+                    const muted = selectedRowId ? !selected : model.ranking && !winner;
                     const inside = width > 82;
                     const text = `${format(row.value)}${suffix === "%" ? "%" : ""}`;
                     return (
                       <div key={row.rowId} className="relative flex items-center">
                         <button
                           type="button"
+                          aria-pressed={selected}
                           aria-label={`${label}${row.series ? `, ${row.series}` : ""}: ${format(row.value)}${suffix}${
                             row.source ? `. Source page ${row.source.page_number}` : ""
                           }`}
@@ -104,7 +108,7 @@ export function ProvenanceChart({
                           onClick={() => row.source && onOpenSource(row.source)}
                           className={`relative h-[18px] rounded-r-[4px] transition-[filter,box-shadow] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-teal-600 ${
                             row.source ? "cursor-pointer" : "cursor-default"
-                          } ${hover?.row.rowId === row.rowId ? "ring-2 ring-zinc-900/15 dark:ring-white/25" : ""}`}
+                          } ${selected ? "ring-2 ring-teal-700 ring-offset-2 dark:ring-teal-300 dark:ring-offset-zinc-900" : hover?.row.rowId === row.rowId ? "ring-2 ring-zinc-900/15 dark:ring-white/25" : ""}`}
                           style={{ width: `${width}%`, background: colorFor(row.series), opacity: muted ? 0.38 : 1 }}
                         >
                           {inside && (

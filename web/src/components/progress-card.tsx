@@ -19,6 +19,8 @@ export function ProgressCard({ pending }: { pending: Pending | null }) {
   const steps = pending?.steps ?? [];
   // Consecutive repeats (e.g. retrieval rounds) collapse into one visible step.
   const visible = steps.filter((step, index) => index === 0 || steps[index - 1].node !== step.node);
+  const recent = visible.slice(-3);
+  const currentLabel = visible.at(-1)?.label;
 
   return (
     <div className="flex gap-3">
@@ -26,10 +28,14 @@ export function ProgressCard({ pending }: { pending: Pending | null }) {
       <div className="min-w-0 flex-1 rounded-2xl border border-zinc-200 bg-zinc-50/60 p-4 dark:border-zinc-800 dark:bg-zinc-900/60">
         <div className="mb-3 flex items-center justify-between text-xs text-zinc-500">
           <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            {pending ? "Researching the Census reports" : "Still working on this answer…"}
+            {pending ? "Following the evidence" : "Still working on this answer…"}
           </span>
           {pending && <span className="tabular-nums">{formatDuration(now - pending.startedAt)}</span>}
         </div>
+        <p role="status" aria-live="polite" className="mb-3 text-base font-medium text-zinc-900 dark:text-zinc-100">
+          {currentLabel ?? (pending ? "Starting your request…" : "Waiting for the answer…")}
+        </p>
+        {visible.length > recent.length && <p className="mb-2 text-xs text-zinc-500">{visible.length - recent.length} earlier steps</p>}
         <ol className="space-y-1.5">
           {visible.length === 0 && (
             <li className="flex items-center gap-2 text-sm text-zinc-500">
@@ -37,8 +43,8 @@ export function ProgressCard({ pending }: { pending: Pending | null }) {
               {pending ? "Starting…" : "The agent is still running; this updates automatically."}
             </li>
           )}
-          {visible.map((step, index) => {
-            const current = index === visible.length - 1;
+          {recent.map((step, index) => {
+            const current = index === recent.length - 1;
             return (
               <li key={`${step.node}-${step.at}`} className="animate-step-in flex items-center gap-2 text-sm">
                 {current ? (

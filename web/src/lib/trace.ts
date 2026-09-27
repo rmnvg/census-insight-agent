@@ -105,7 +105,7 @@ export function describeDerivation(claim: Claim): string | null {
   const symbol = OPERATION_SYMBOL[derivation.operation];
   const expression =
     derivation.operation === "percentage_difference"
-      ? `(${formatNumber(derivation.operands[0])} → ${formatNumber(derivation.operands[1])})`
+      ? `(${formatNumber(derivation.operands[0])} − ${formatNumber(derivation.operands[1])}) / |${formatNumber(derivation.operands[1])}| × 100`
       : derivation.operands.map(formatNumber).join(` ${symbol} `);
   const unit = derivation.unit === "percentage_points" ? " pp" : derivation.unit === "percent" ? "%" : "";
   return `${expression} = ${formatNumber(derivation.result)}${unit}`;

@@ -24,6 +24,7 @@ import { citationNumbers, describeDerivation, orderedCitations } from "@/lib/tra
 import type { ApiError, ChatResponse, Citation, Claim } from "@/lib/types";
 
 import { ArtifactCard } from "./artifact-card";
+import { CalculationCards } from "./calculation-card";
 import { LogoMark } from "./logo";
 import { PageViewer } from "./page-viewer";
 import { TracePanel } from "./trace-panel";
@@ -41,6 +42,11 @@ export function AssistantMessage({
   embedded?: boolean;
 }) {
   const [viewing, setViewing] = useState<Citation | null>(null);
+  const [selectedChunk, setSelectedChunk] = useState<string | null>(null);
+  const openCitation = (citation: Citation) => {
+    setSelectedChunk(citation.chunk_id);
+    setViewing(citation);
+  };
   const [copied, setCopied] = useState(false);
   const citations = orderedCitations(response.citations);
   const numbers = citationNumbers(response.citations);
@@ -69,7 +75,7 @@ export function AssistantMessage({
         {claimsAreAnswer ? (
           <div className="answer-prose">
             {claims.map((claim) => (
-              <ClaimLine key={claim.claim_id} claim={claim} numbers={numbers} byId={byId} onOpen={setViewing} />
+              <ClaimLine key={claim.claim_id} claim={claim} numbers={numbers} byId={byId} onOpen={openCitation} />
             ))}
           </div>
         ) : (
@@ -86,7 +92,7 @@ export function AssistantMessage({
                 </h4>
                 <div className="space-y-2 text-sm">
                   {visibleClaims.map((claim) => (
-                    <ClaimLine key={claim.claim_id} claim={claim} numbers={numbers} byId={byId} onOpen={setViewing} />
+                    <ClaimLine key={claim.claim_id} claim={claim} numbers={numbers} byId={byId} onOpen={openCitation} />
                   ))}
                 </div>
                 {claims.length > CLAIM_PREVIEW && (
@@ -103,6 +109,8 @@ export function AssistantMessage({
           </>
         )}
 
+        <CalculationCards response={response} onOpen={openCitation} />
+
         {response.limitations.length > 0 && (
           <section className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-sm dark:border-amber-900/60 dark:bg-amber-950/30">
             <p className="mb-1 flex items-center gap-1.5 font-medium text-amber-800 dark:text-amber-300">
@@ -117,7 +125,7 @@ export function AssistantMessage({
         )}
 
         {response.artifacts.map((artifact) => (
-          <ArtifactCard key={artifact.artifact_id} artifact={artifact} />
+          <ArtifactCard key={artifact.artifact_id} artifact={artifact} onSelectSource={(citation) => setSelectedChunk(citation.chunk_id)} />
         ))}
 
         {citations.length > 0 && (
@@ -130,8 +138,9 @@ export function AssistantMessage({
                 <button
                   key={citation.citation_id}
                   type="button"
-                  onClick={() => setViewing(citation)}
-                  className="group flex min-w-0 flex-col gap-1.5 rounded-xl border border-zinc-200 p-3 text-left transition hover:border-teal-600/40 hover:shadow-sm dark:border-zinc-800 dark:hover:border-teal-500/40"
+                  onClick={() => openCitation(citation)}
+                  aria-pressed={selectedChunk === citation.chunk_id}
+                  className={`group flex min-w-0 flex-col gap-1.5 rounded-xl border p-3 text-left transition hover:border-teal-600/40 hover:shadow-sm ${selectedChunk === citation.chunk_id ? "border-teal-600 bg-teal-50 ring-1 ring-teal-600/30 dark:bg-teal-950/40" : "border-zinc-200 dark:border-zinc-800"}`}
                 >
                   <span className="flex items-center gap-2 text-xs">
                     <span className="rounded bg-teal-50 px-1.5 font-semibold text-teal-700 dark:bg-teal-950/60 dark:text-teal-300">
