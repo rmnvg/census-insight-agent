@@ -238,6 +238,43 @@
     "source_note": "Wrong-year column. Odisha Statement 6 (physical page 25): ODISHA 2001 Total 972. Not 979 (2011 Total) or 987 (2001 Rural, also the Scheduled Castes 2011 figure)."
   },
   {
+    "case_id": "ka-literacy-2001",
+    "category": "lookup",
+    "question": "What was Karnataka's total literacy rate in 2001?",
+    "expected_facts": [
+      {
+        "region": "Karnataka",
+        "metric": "literacy",
+        "value": 66.64,
+        "year": 2001
+      }
+    ],
+    "source_note": "Verified against the original Karnataka PDF, physical page 50, Statement 19: Literacy Rate > 2001 > Total is 66.64. Adjacent 2001 Rural/Urban are 59.33/80.58; 2011 Total is 75.36."
+  },
+  {
+    "case_id": "ka-literacy-change",
+    "category": "comparison",
+    "question": "How did Karnataka's literacy rate change from 2001 to 2011?",
+    "expected_facts": [
+      {
+        "region": "Karnataka",
+        "metric": "literacy",
+        "value": 75.36,
+        "year": 2011
+      },
+      {
+        "region": "Karnataka",
+        "metric": "literacy",
+        "value": 66.64,
+        "year": 2001
+      }
+    ],
+    "expected_derived": [
+      8.72
+    ],
+    "source_note": "Year change. Karnataka Statement 19 (physical page 50): KARNATAKA Literacy Rate 2001 Total 66.64, 2011 Total 75.36, under one 'Literacy Rate' header. The 8.72-point change is computed in application code. Not 59.33/80.58 (2001 Rural/Urban) or 68.73/85.78 (2011 Rural/Urban)."
+  },
+  {
     "case_id": "od-urban-sex-ratio",
     "category": "lookup",
     "question": "What was the urban sex ratio of Odisha in 2011?",

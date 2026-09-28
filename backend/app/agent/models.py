@@ -13,6 +13,7 @@ from backend.app.execution.contracts import (
     SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.tables.models import TableRecord
 from backend.app.tables.selection import ColumnSelection
 
 TaskType = Literal[
@@ -43,6 +44,16 @@ class ArtifactDataRequirement(BaseModel):
     rank_direction: Literal["max", "min"] | None = None
 
 
+class YearScope(BaseModel):
+    """One named state's metric at one or two explicitly requested Census years."""
+
+    metric: str = Field(min_length=1)
+    region: str = Field(min_length=1)
+    years: list[int] = Field(min_length=1, max_length=2)
+    residence: Literal["total", "rural", "urban"] = "total"
+    population: Literal["persons", "males", "females"] = "persons"
+
+
 class TaskClassification(BaseModel):
     task_type: TaskType
     regions: list[str] = Field(default_factory=list)
@@ -51,6 +62,7 @@ class TaskClassification(BaseModel):
     clarification_question: str | None = None
     artifact_requirement: ArtifactDataRequirement | None = None
     reason: str = Field(min_length=1)
+    year_scope: YearScope | None = None
 
 
 class ResolvedQuery(BaseModel):
@@ -61,6 +73,7 @@ class ResolvedQuery(BaseModel):
     regions: list[str] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list)
     artifact_requirement: ArtifactDataRequirement | None = None
+    year_scope: YearScope | None = None
 
 
 EvidenceRelevance = Literal[
@@ -361,6 +374,8 @@ class AgentState(TypedDict, total=False):
     resolved_query: str
     task_type: TaskType
     classification: TaskClassification
+    # Set by classify_task each turn: why a named Census year is outside the supplied tables.
+    scope_refusal: str | None
     artifact_requirement: ArtifactDataRequirement | None
     selected_skill: str | None
     skill_instructions: str | None
@@ -386,6 +401,7 @@ class AgentState(TypedDict, total=False):
     calculations: list[CalculationResult]
     artifact_dataset: ArtifactDataset | None
     table_selection: ColumnSelection | None
+    year_cells: list[TableRecord]
     ranking_winner: SourceRecord | None
     generated_code: str | None
     execution_request: ExecutionRequest | None

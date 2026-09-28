@@ -20,7 +20,10 @@ def shipped() -> tuple[list[TrustCase], Scorecard]:
 def test_shipped_scorecard_is_a_repeated_v2_run_with_no_wrong_answers() -> None:
     cases, card = shipped()
     assert card.scorer_version == 2 and card.repeats == 2
-    assert card.cases_total == 2 * len(cases)
+    recorded = {result.case_id for result in card.results}
+    # The dated scorecard is historical evidence, not a promise that newly added cases ran.
+    assert recorded <= {case.case_id for case in cases}
+    assert card.cases_total == len(card.results) == 2 * len(recorded)
     assert (card.wrong_answers, card.unsupported_answers, card.misattributed_claims) == (0, 0, 0)
 
 
@@ -94,7 +97,7 @@ def test_publish_upserts_items_and_records_one_run_per_repeat() -> None:
     url = publish_scorecard(client, cases, card, run_name="gemini-2.5-flash test")  # type: ignore[arg-type]
 
     assert url == "http://langfuse.local/run/2" and client.flushed
-    assert len(client.items) == len(cases)
+    assert set(client.items) == {f"trust-{result.case_id}" for result in card.results}
     assert client.items["trust-refuse-gdp"]["expected_output"]["refuse"] is True
     [fact] = client.items["trust-ka-literacy"]["expected_output"]["facts"]
     assert (fact["region"], fact["value"], fact["year"]) == ("Karnataka", 75.36, 2011)

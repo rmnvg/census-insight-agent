@@ -7,7 +7,9 @@ from backend.app.agent.quotes import (
     select_evidence_span_with_diagnostic,
 )
 from backend.app.agent.scopes import unrequested_subgroups
+from backend.app.agent.years import table_year_verdict
 from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.tables.models import TableRecord
 
 
 class CitationValidationResult(BaseModel):
@@ -26,8 +28,13 @@ def validate_and_materialize_citations(
     draft: DraftAnswer,
     evidence: list[RetrievedEvidence],
     calculations: list[CalculationResult] | None = None,
+    table_cells: dict[str, list[TableRecord]] | None = None,
 ) -> CitationValidationResult:
-    """Resolve model-selected chunk IDs into trusted citation metadata."""
+    """Resolve model-selected chunk IDs into trusted citation metadata.
+
+    `table_cells` holds table-store cells verified against each chunk's text (see
+    `AgentTools.table_cells`); without them, only the textual checks apply.
+    """
     by_id = {item.chunk_id: item for item in evidence}
     citations: list[Citation] = []
     citation_by_claim_chunk: dict[tuple[str, str], str] = {}
@@ -81,6 +88,7 @@ def validate_and_materialize_citations(
         citation_ids: list[str] = []
         unsupported: list[str] = []
         errors_for_subgroup: list[str] = []
+        errors_for_year: list[str] = []
         if is_derived and claim.derivation is not None:
             # A derived claim cites exactly what its validated input claims cite.
             for input_id in claim.derivation.input_claim_ids:
@@ -129,7 +137,17 @@ def validate_and_materialize_citations(
                 errors_for_subgroup.append(evidence_id)
                 unsupported.append(evidence_id)
                 continue
-            span, diagnostic = select_evidence_span_with_diagnostic(claim, item)
+            # The table store knows each cell's column year even where this fragment's header
+            # does not print it. A value only in another year's column is the wrong-year error
+            # (a 2001 cell reported as 2011, or stated with no year at all).
+            year_verdict = table_year_verdict(claim, (table_cells or {}).get(item.chunk_id, []))
+            if year_verdict == "contradicted":
+                # Never pruned: another citation passing cannot make a mislabelled year right.
+                errors_for_year.append(evidence_id)
+                continue
+            span, diagnostic = select_evidence_span_with_diagnostic(
+                claim, item, year_confirmed=year_verdict == "confirmed"
+            )
             quote_diagnostics.append(diagnostic)
             if span is None:
                 unsupported.append(evidence_id)
@@ -164,6 +182,13 @@ def validate_and_materialize_citations(
                 error_codes.append("CLAIM_QUOTE_NOT_FOUND")
                 if errors_for_subgroup:
                     error_codes.append("SUBGROUP_TABLE_FOR_WHOLE_POPULATION_CLAIM")
+        if errors_for_year:
+            errors.extend(
+                f"Evidence {evidence_id} holds claim {claim.claim_id}'s value only in another "
+                "year's column"
+                for evidence_id in errors_for_year
+            )
+            error_codes.append("TABLE_YEAR_COLUMN_MISMATCH")
         claim_citations[claim.claim_id] = citation_ids
         claims.append(
             AnswerClaim(

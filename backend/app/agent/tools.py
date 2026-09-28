@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from qdrant_client import models
 
 from backend.app.agent.calculations import rounded_subtraction
-from backend.app.agent.models import ArtifactDataRequirement, EvidenceReference
+from backend.app.agent.models import ArtifactDataRequirement, EvidenceReference, YearScope
 from backend.app.agent.skills import RuntimeSkill, SkillMetadata, SkillRegistry
 from backend.app.ingestion.models import (
     CoverageLimitation,
@@ -20,7 +20,7 @@ from backend.app.ingestion.uploads import withdrawn_document_ids
 from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
 from backend.app.retrieval.qdrant_store import QdrantStore
 from backend.app.retrieval.service import HybridRetrievalService
-from backend.app.tables.models import DocumentTables
+from backend.app.tables.models import DocumentTables, TableRecord, census_years, table_records
 from backend.app.tables.selection import ColumnSelection, TableSelectionError, select_column
 from backend.app.tables.store import load_document_tables, tables_path
 
@@ -99,6 +99,14 @@ class TableLookup(BaseModel):
     """A verified table column with the indexed chunks that cite it, or why there is none."""
 
     selection: ColumnSelection | None = None
+    evidence: list[RetrievedEvidence] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class YearLookup(BaseModel):
+    """State-level cells selected by complete column scope and rechecked against Qdrant."""
+
+    records: list[TableRecord] = Field(default_factory=list)
     evidence: list[RetrievedEvidence] = Field(default_factory=list)
     reason: str | None = None
 
@@ -385,6 +393,113 @@ class AgentTools:
             for chunk_id in chunk_ids
         ]
         return TableLookup(selection=selection, evidence=await self.with_table_titles(evidence))
+
+    async def select_year_cells(self, scope: YearScope) -> YearLookup:
+        documents = [
+            item
+            for item in await self.list_documents()
+            if item.region.casefold() == scope.region.casefold()
+        ]
+        if len(documents) != 1:
+            return YearLookup(reason="TABLE_AMBIGUOUS_DOCUMENT")
+        document = documents[0]
+        if document.document_id in withdrawn_document_ids(self.data_root):
+            return YearLookup(reason="DOCUMENT_WITHDRAWN")
+        store = await asyncio.to_thread(self._document_tables, document.document_id)
+        if store is None or store.source_checksum != document.source_checksum:
+            return YearLookup(reason="TABLE_STORE_MISSING_OR_STALE")
+        records: list[TableRecord] = []
+        for year in sorted(set(scope.years), reverse=True):
+            try:
+                selection = select_column(
+                    store,
+                    metric=scope.metric.replace("_", " "),
+                    year=year,
+                    residence=scope.residence,
+                    population=scope.population,
+                )
+            except TableSelectionError as error:
+                return YearLookup(reason=error.code)
+            cell = selection.aggregate
+            if (
+                cell is None
+                or cell.entity.casefold() != scope.region.casefold()
+                or not cell.chunk_id
+            ):
+                return YearLookup(reason="TABLE_STATE_ROW_MISSING")
+            records.append(cell)
+        chunk_ids = list(dict.fromkeys(cell.chunk_id for cell in records if cell.chunk_id))
+        points = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.store.client.retrieve,
+                self.store.collection_name,
+                ids=chunk_ids,
+                with_payload=True,
+                with_vectors=False,
+            ),
+            timeout=self.timeout_seconds,
+        )
+        payloads = {str(point.id): point.payload or {} for point in points}
+        for cell in records:
+            payload = payloads.get(cell.chunk_id or "", {})
+            if (
+                payload.get("document_id") != document.document_id
+                or payload.get("page_number") != cell.page_number
+                or payload.get("source_checksum") != store.source_checksum
+                or cell.line not in str(payload.get("text", "")).splitlines()
+            ):
+                return YearLookup(reason="TABLE_STORE_STALE")
+        evidence = [
+            RetrievedEvidence.model_validate({**payloads[chunk_id], "retrieval_score": 1.0})
+            for chunk_id in chunk_ids
+        ]
+        return YearLookup(records=records, evidence=await self.with_table_titles(evidence))
+
+    async def census_years(self) -> dict[str, list[int]]:
+        """Each document's table years, so scope follows what the tables actually contain."""
+
+        def _read() -> dict[str, list[int]]:
+            withdrawn = set(withdrawn_document_ids(self.data_root))
+            years: dict[str, list[int]] = {}
+            for path in sorted((self.data_root / "processed" / "tables").glob("*.json")):
+                if path.stem in withdrawn:
+                    continue
+                store = self._document_tables(path.stem)
+                if store is not None:
+                    years[store.document_id] = census_years(store)
+            return years
+
+        return await asyncio.to_thread(_read)
+
+    async def table_cells(self, evidence: list[RetrievedEvidence]) -> dict[str, list[TableRecord]]:
+        """Table-store cells whose row line sits verbatim in the given chunk, keyed by chunk ID.
+
+        The store resolved each column's year and residence from the whole table, which a later
+        fragment's truncated header cannot show. A cell is returned only when the store matches the
+        chunk's document version and its exact line is in the chunk text.
+        """
+
+        def _read() -> dict[str, list[TableRecord]]:
+            wanted = {item.chunk_id: item for item in evidence if "|" in item.text}
+            cells: dict[str, list[TableRecord]] = {}
+            for document_id in sorted({item.document_id for item in wanted.values()}):
+                store = self._document_tables(document_id)
+                if store is None:
+                    continue
+                for record in table_records(store):
+                    item = wanted.get(record.chunk_id or "")
+                    if (
+                        item is None
+                        or item.document_id != document_id
+                        or item.source_checksum != store.source_checksum
+                        or item.page_number != record.page_number
+                        or record.line not in item.text.splitlines()
+                    ):
+                        continue
+                    cells.setdefault(item.chunk_id, []).append(record)
+            return cells
+
+        return await asyncio.to_thread(_read)
 
     def _document_tables(self, document_id: str) -> DocumentTables | None:
         """The parsed store, re-read only when its file changes (a store is ~1 MB of JSON)."""

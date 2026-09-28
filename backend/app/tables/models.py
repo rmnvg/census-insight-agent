@@ -104,6 +104,18 @@ def parse_number(raw: str) -> Decimal | None:
         return None
 
 
+def census_years(document: DocumentTables) -> list[int]:
+    """The Census years the document's tables print a value column for (e.g. 2001 and 2011)."""
+    return sorted(
+        {
+            column.year
+            for table in document.tables
+            for column in table.value_columns()
+            if column.metric is not None and column.year is not None
+        }
+    )
+
+
 def table_records(document: DocumentTables) -> Iterator[TableRecord]:
     for table in document.tables:
         population = table.population_group

@@ -146,6 +146,7 @@ class AgentService:
             timeout_seconds=resolved.agent_provider_timeout_seconds,
             max_retries=resolved.agent_provider_max_retries,
             catalog=tools.list_documents,
+            census_years=tools.census_years,
         )
         return cls(resolved, model, tools)
 
@@ -516,6 +517,7 @@ class AgentService:
             "calculations": [],
             "artifact_dataset": None,
             "table_selection": None,
+            "year_cells": [],
             "generated_code": None,
             "execution_request": None,
             "execution_result": None,
