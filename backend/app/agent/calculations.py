@@ -9,6 +9,7 @@ from backend.app.agent.models import (
     DraftClaim,
 )
 from backend.app.agent.scopes import canonical_scopes
+from backend.app.agent.years import CORPUS_DEFAULT_YEAR
 from backend.app.retrieval.models import RetrievedEvidence
 
 _NUMBER = re.compile(r"(?<![\d,])\d[\d,]*(?:\.\d+)?(?!\d)")
@@ -165,10 +166,28 @@ def add_deterministic_derived_claims(
             if scope in {"rural", "urban"} and scope == (right.residence_scope or "").casefold()
             else ""
         )
-        text = (
-            f"{prefix}{left.region or 'The first value'} is {relation} than "
-            f"{right.region or 'the second value'} by {formatted}{unit_text}."
+        # One region in two Census years is a change over time, not a gap between regions; each
+        # input's year was bound to its own column by citation validation. An input stating no
+        # year is the report's own year.
+        left_year = left.year or CORPUS_DEFAULT_YEAR
+        right_year = right.year or CORPUS_DEFAULT_YEAR
+        year_change = bool(
+            left.region
+            and right.region
+            and left.region.casefold() == right.region.casefold()
+            and left_year != right_year
         )
+        if year_change:
+            metric = (left.metric or "value").replace("_", " ").lower()
+            text = (
+                f"{prefix}{left.region}'s {metric} was {relation} in {left_year} than in "
+                f"{right_year} by {formatted}{unit_text}."
+            )
+        else:
+            text = (
+                f"{prefix}{left.region or 'The first value'} is {relation} than "
+                f"{right.region or 'the second value'} by {formatted}{unit_text}."
+            )
         evidence_ids = list(
             dict.fromkeys(value for claim in inputs for value in claim.evidence_ids)
         )
@@ -179,7 +198,8 @@ def add_deterministic_derived_claims(
                 evidence_ids=evidence_ids,
                 document_derived=True,
                 metric=left.metric,
-                year=left.year,
+                # A change spans two years, so it has no single year of its own.
+                year=None if year_change else left.year,
                 population_scope=left.population_scope,
                 residence_scope=left.residence_scope,
                 value=calculation.result,

@@ -262,16 +262,55 @@
   counted as wrong answers, and provenance checked by locating the value on its region's row and
   column in the cited quote. See DESIGN.md, "Trust scorecard".
 
-### Questions about 2001 declined — known limitation
+### Questions about 2001 declined — fixed for verified table columns
 
 - **Input:** "What was the sex ratio of Karnataka in 2001?" (and Odisha).
 - **Observed behavior:** The agent declines, or asks whether 2011 is meant instead.
-- **Root cause:** Task classification treats the corpus as 2011-only, although its tables carry
-  2001 columns beside the 2011 ones.
+- **Root cause:** The classifier/resolver did not explicitly say "2011 only", but their document
+  catalog gave publication titles without available column years. The research planner explicitly
+  requested 2011 questions, and comparison rewriting required the *same year across regions*,
+  including for a question about one region changing over time. Table selection and hydration
+  defaulted an omitted year to 2011; those defaults did not override an explicit 2001 request.
+  Finally, later literacy-table fragments lose the second header row containing the years, so
+  quote-only year checks could not establish which year a cell belonged to.
 - **Safety impact:** None; it is the safe failure, and the benchmark counts it as an unnecessary
   refusal rather than a wrong answer.
-- **Proposed future fix:** Scope questions by the years the tables actually contain, then rely on
-  the column provenance checks to keep 2001 and 2011 values apart.
+- **Fix:** The catalog now lists years from each document's structured table columns. Classification,
+  resolution, assessment, and research planning preserve requested years. For a named state's
+  year-specific lookup or two-year change, a typed scope selects the table's exact metric, year,
+  residence, and population column. Every selected state row is re-read from Qdrant and checked
+  against its document, physical page, source checksum, and verbatim row before use. Missing or
+  ambiguous selections fall back to the existing evidence path, never to a substitute year.
+- **Arithmetic and citations:** The later and earlier selected cells feed the existing comparison
+  calculation and derived-claim path. Rate changes remain percentage points. Each input has its
+  own year and citation; the derived claim inherits both citations and has no single year. The
+  citation gate checks column dimensions as well as year, including when identical numbers occur
+  in different columns. Trusted table metadata may establish a year missing from a truncated
+  header; the quoted source text is unchanged and all other provenance checks remain. A resolver
+  dropping the user's explicit year fails the response invariant. A requested Census year beyond
+  those supplied, such as 2021, is refused without reporting a 2011 value in its place.
+- **Source verification:** Visually checked the original PDFs: Karnataka Statement 6, physical
+  page 30, 2001 Total sex ratio **965**; Odisha Statement 6, physical page 25, 2001 Total **972**;
+  Karnataka Statement 19, physical page 50, Total literacy **66.64% (2001)** and **75.36% (2011)**,
+  giving **8.72 percentage points**. Printed page labels differ from these physical PDF indexes.
+- **Regression coverage:** `backend/tests/test_year_scope.py` uses real table/chunk fixtures for
+  lookups, both cited operands of a year change, swapped-year and wrong-residence rejection,
+  missing later-fragment headers, stale checksums/pages/rows, checkpoint round trips, dropped
+  resolver years, and a 2021 refusal. `make check` passes **491 tests**, with 7 service-dependent
+  tests skipped; `make integration-test` separately passes all **17** integration tests.
+- **Benchmark:** Added the source-verified 2001 literacy lookup and 2001→2011 literacy change
+  to `evals/trust_benchmark.json`; the existing Karnataka/Odisha 2001 sex-ratio and 2021-refusal
+  cases remain. The dated full scorecard is unchanged; new cases are not represented as old runs.
+- **Live verification (2026-09-28, Vertex `gemini-2.5-flash`):** Two repetitions of each of the five
+  year cases passed **10/10**: 8/8 supported answers, 2/2 correct 2021 refusals, no wrong or
+  unsupported answers, and 6.4 s median latency. Results and raw responses are saved locally as
+  `data/processed/year-scope-scorecard.json` and `data/processed/year-scope-responses.jsonl`.
+  The two literacy-change runs (`b1816b3c-d6ce-49f7-8568-ca31c2377f4d` and
+  `d7230970-46f6-44bb-9f55-abb4249507ca`) cite both input cells on physical page 50 and use
+  application-computed operands `[75.36, 66.64]` with result `8.72`, unit `percentage_points`.
+  After the final rewrite safeguard (preserving change intent even when a rewrite drops the word
+  "change"), a further live literacy-change smoke check passed in 8.3 s; its separate result is
+  `data/processed/year-scope-final-smoke.json`.
 
 ### Failed-upload cleanup could leave evidence without its source PDF — fixed
 

@@ -29,7 +29,20 @@ from backend.app.execution.contracts import (
 from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
 
 DocumentCatalog = Callable[[], Awaitable[list[DocumentSummary]]]
+CensusYears = Callable[[], Awaitable[dict[str, list[int]]]]
 _CATALOG_LIMIT = 50
+_YEAR_SCOPE = """Year scope follows the column years listed for each document, not its publication
+date. The bundled Census 2011 reports also print earlier Census columns. A question
+about a listed year, or about how a value changed between two listed years, is in scope: never
+classify it out_of_scope and never ask whether 2011 is meant instead. A change between years for
+one region is task_type=comparison with that one region. A Census year later than every listed
+year (e.g. 2021 when the latest listed year is 2011) is out_of_scope.
+For a lookup or change of ONE whole state's metric at one or two explicitly named years, fill
+year_scope with its metric, exact catalog region, years, residence (default total), and population
+(default persons). Preserve qualifiers in the metric, e.g. 'child sex ratio'. Never fill year_scope
+for district questions, multiple metrics, summaries, artifacts, or comparisons across regions.
+For a question about change, keep both years; the application selects the source cells and computes
+the difference. Do not invent values."""
 
 ModelResult = TypeVar("ModelResult", bound=BaseModel)
 REQUEST_DEADLINE: ContextVar[float | None] = ContextVar("agent_request_deadline", default=None)
@@ -185,11 +198,13 @@ class GeminiAgentModel:
         timeout_seconds: float = 60,
         max_retries: int = 1,
         catalog: DocumentCatalog | None = None,
+        census_years: CensusYears | None = None,
     ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.catalog = catalog
+        self.census_years = census_years
 
     async def _catalog_note(self) -> str:
         """Name the supplied documents so scope and region names come from the library itself.
@@ -206,8 +221,21 @@ class GeminiAgentModel:
             return ""
         if not documents:
             return ""
+        years: dict[str, list[int]] = {}
+        if self.census_years is not None:
+            try:
+                years = await self.census_years()
+            except Exception:
+                years = {}
+
+        def _years(document_id: str) -> str:
+            listed = years.get(document_id)
+            if not listed:
+                return ""
+            return f"; Census years in its tables: {', '.join(str(year) for year in listed)}"
+
         lines = "\n".join(
-            f"- {item.document_id}: {item.title} (region: {item.region})"
+            f"- {item.document_id}: {item.title} (region: {item.region}{_years(item.document_id)})"
             for item in documents[:_CATALOG_LIMIT]
         )
         return f"Supplied documents (use these exact region names and document IDs):\n{lines}\n\n"
@@ -278,7 +306,9 @@ A request asking which unnamed entity (e.g. district) has the highest/lowest/mos
 value of a metric, rather than naming specific targets, is task_type=artifact_table with an empty
 regions list and artifact_requirement.rank_all=true, plus rank_direction set to max or min. Identify
 the single report being scanned by region or document_id; do not enumerate individual entity names.
-Do not answer the question.""",
+Do not answer the question.
+"""
+            + _YEAR_SCOPE,
             f"{await self._catalog_note()}Recent conversation:\n{self._context(context)}\n\n"
             f"Current request:\n{query}",
         )
@@ -292,22 +322,27 @@ Do not answer the question.""",
         return await self._structured(
             ResearchPlan,
             """Plan a short research brief that will be answered ONLY from the supplied Indian
-Census 2011 reports. Do not answer anything yourself.
+Census reports. Do not answer anything yourself.
 If the topic cannot be addressed from Census population data (e.g. GDP, income, health outcomes,
-other countries, events after 2011), set in_scope=false, give a one-sentence reason, and no
+other countries, Census years beyond those listed in the supplied documents), set in_scope=false,
+give a one-sentence reason, and no
 sections.
 Otherwise return a title (at most 80 characters) and 3 to 5 sections. Each section has a heading
 (at most 60 characters) and ONE self-contained question the assistant can answer with citations:
 - Name every region explicitly using the exact region names in the supplied documents list; never
   write "the state", "it", or "these regions".
-- Ask about ONE whole-population metric for 2011: literacy rate, sex ratio, or total population.
+- Ask about ONE whole-population metric: literacy rate, sex ratio, or total population.
+  Preserve the topic's requested years using the listed table years, including earlier years and
+  changes between two years for one region. Use 2011 only if the topic leaves its year unspecified.
   Do not ask about male/female, child, age-group, rural/urban, caste, or tribe subgroups; each
   section must be answerable from a state's or district's total-persons figure.
-- Use one of these forms: a lookup for one region; a comparison of two named regions; "Which
+- Use one of these forms: a lookup for one region and year; a change between two listed years for
+  one region; a comparison of two named regions in the same year; "Which
   district of <region> had the highest/lowest <literacy rate or sex ratio>?"; or "Create a bar
   chart comparing the <literacy rate or sex ratio> of <region> and <region>."
 - Include at most one chart section and at most one district-ranking section.
-- Order sections from the headline figure to detail. Do not repeat a question.""",
+- Order sections from the headline figure to detail. Do not repeat a question.
+Do not replace a requested earlier year with the report's publication year.""",
             f"{await self._catalog_note()}Research topic:\n{topic}",
         )
 
@@ -321,7 +356,10 @@ Do not invent it. Classify the resolved standalone task and extract all regions/
 For artifact tasks, preserve the complete typed artifact data requirement, including rank_all and
 rank_direction when the follow-up still asks which unnamed entity has the highest/lowest value.
 Do not set requires_clarification when the rewritten query contains the metric and every target.
-Regions named in the supplied documents list are valid targets; use their exact names.""",
+Regions named in the supplied documents list are valid targets; use their exact names.
+Keep every year the user named; for a change over time, name both years in the rewrite.
+"""
+            + _YEAR_SCOPE,
             f"{await self._catalog_note()}Recent conversation:\n{self._context(context)}\n\n"
             f"Current request:\n{query}",
         )
@@ -339,6 +377,9 @@ Regions named in the supplied documents list are valid targets; use their exact 
             EvidenceAssessment,
             """Classify each candidate's relevance to the exact question. A direct answer must
 jointly match the requested entity, metric, year/category when specified, explicit value, and unit.
+A table printing a column for the requested year (e.g. "Sex Ratio 2001" beside "Sex Ratio 2011")
+is a year match even when the report itself is a 2011 report; for a change between two years, a
+candidate holding the entity's value for either year is a direct answer for that year.
 The scope flags mean compatibility with the question, not whether the question literally named
 that dimension. If population or residence is unspecified, use the corpus convention of Persons
 and Total. A Total column in a Persons table is a scope match for an unqualified state literacy
@@ -410,7 +451,10 @@ in the claim's own sentence, when that exact year appears as a literal number in
 cited for that claim. A report's current-period figure is often stated without restating its year
 even though an explicit comparison year like 2001 appears nearby in the same passage: for that
 figure, write the claim without naming a year and leave the year field unset, rather than writing
-or inferring a year the cited text never states. {claim_scope}""",
+or inferring a year the cited text never states. A year printed in the cited table's column header
+is stated for the values in that column: when the question asks about an earlier Census year such as
+2001, or about a change between years, write one claim per year, name that year in the sentence and
+the year field, and take each value from that year's own column. {claim_scope}""",
             f"Task={task_type}\nQuery={query}\nSkill={skill or 'none'}\n"
             f"Limitations={limitations}\nDeterministic calculations="
             f"{[item.model_dump() for item in calculations]}\n\n{evidence_text}",
@@ -426,7 +470,9 @@ or inferring a year the cited text never states. {claim_scope}""",
 inconsistency analysis. Copy numeric inputs from current evidence and include every supporting
 EVIDENCE_ID. The application, not the model, determines operation semantics; the operation field is
 treated only as a schema placeholder. Return no calculation when units, year, category, or operands
-are ambiguous. Do not calculate the result.""",
+are ambiguous. For a change between two years for one region, the operands are the later year's
+value first and the earlier year's value second, each copied from its own year's column of the same
+row. Do not calculate the result.""",
             f"Question={query}\nEvidence:\n{excerpts}",
         )
         return plan.calculations

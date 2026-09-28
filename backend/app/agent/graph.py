@@ -38,6 +38,7 @@ from backend.app.agent.models import (
     AgentResponse,
     AgentState,
     ArtifactDataRequirement,
+    CalculationRequest,
     CalculationResult,
     DraftAnswer,
     DraftClaim,
@@ -49,7 +50,20 @@ from backend.app.agent.models import (
 )
 from backend.app.agent.provider import AgentModel, ProviderCallTimeout, ProviderOperationalError
 from backend.app.agent.scopes import canonicalize_artifact_requirement
-from backend.app.agent.tools import AgentTools, ArithmeticInput, SearchDocumentsInput, TableLookup
+from backend.app.agent.tools import (
+    AgentTools,
+    ArithmeticInput,
+    SearchDocumentsInput,
+    TableLookup,
+    YearLookup,
+)
+from backend.app.agent.years import (
+    CORPUS_DEFAULT_YEAR,
+    is_year_change,
+    named_years,
+    year_cell_draft,
+    years_beyond,
+)
 from backend.app.execution.client import (
     EXECUTOR_HEARTBEAT_HEALTHY_SECONDS,
     ArtifactStore,
@@ -81,6 +95,7 @@ from backend.app.execution.lineage import (
 )
 from backend.app.execution.presentation import artifact_response
 from backend.app.retrieval.models import DocumentSummary, RetrievedEvidence
+from backend.app.tables.models import TableRecord
 from backend.app.tables.selection import ColumnSelection
 from executor.policy import validate_code
 
@@ -329,9 +344,29 @@ class AgentGraph:
             if deterministic
             else await self.model.classify(state["user_query"], context)
         )
+        # Scope follows the years the tables contain. A Census year after all of them (2021) is
+        # refused here, deterministically, rather than left to the model, which could otherwise
+        # answer with the 2011 figure. Earlier years are left to the evidence checks.
+        corpus_years = await self._corpus_years()
+        beyond = [] if deterministic else years_beyond(state["user_query"], corpus_years)
+        scope_refusal: str | None = None
+        if beyond:
+            listed = " and ".join(str(year) for year in sorted(corpus_years))
+            missing = " and ".join(str(year) for year in beyond)
+            scope_refusal = (
+                f"The supplied Census reports contain figures for {listed}; they do not cover "
+                f"{missing}, so I can’t answer that from them."
+            )
+            classification = classification.model_copy(
+                update={
+                    "task_type": "out_of_scope",
+                    "reason": f"Census year {missing} is not in the supplied tables",
+                }
+            )
         return {
             "classification": classification,
             "task_type": classification.task_type,
+            "scope_refusal": scope_refusal,
             "trace_events": [
                 *state.get("trace_events", []),
                 *(
@@ -347,6 +382,8 @@ class AgentGraph:
                     details={
                         "task_type": classification.task_type,
                         "deterministic_safeguard": deterministic,
+                        "corpus_census_years": sorted(corpus_years),
+                        "years_beyond_corpus": beyond,
                         "conversation_message_count": len(context),
                         "validated_history_turn_count": len(
                             state.get("validated_claim_history", [])
@@ -361,6 +398,27 @@ class AgentGraph:
                 ),
             ],
         }
+
+    async def _corpus_years(self) -> set[int]:
+        """Every Census year a document's table store prints a column for."""
+        census_years = getattr(self.tools, "census_years", None)
+        if census_years is None:
+            return set()
+        try:
+            by_document = await census_years()
+        except Exception:
+            return set()
+        return {year for years in by_document.values() for year in years}
+
+    async def _table_cells(self, evidence: list[RetrievedEvidence]) -> dict[str, list[TableRecord]]:
+        """Verified table-store cells for the cited chunks; empty leaves textual checks alone."""
+        table_cells = getattr(getattr(self, "tools", None), "table_cells", None)
+        if table_cells is None or not evidence:
+            return {}
+        try:
+            return cast(dict[str, list[TableRecord]], await table_cells(evidence))
+        except Exception:
+            return {}
 
     async def resolve_query(self, state: AgentState) -> dict[str, object]:
         started = time.monotonic()
@@ -415,13 +473,42 @@ class AgentGraph:
             }
         resolved = await self.model.resolve(state["user_query"], context)
         classification = state["classification"]
+        scope = resolved.year_scope or classification.year_scope
+        if scope is not None:
+            # The parser proposes dimensions, never values. Do not let a rewrite drop a year
+            # explicitly requested by the user or add one absent from the standalone question.
+            explicit = set(named_years(state["user_query"]))
+            if not explicit <= set(scope.years) or set(scope.years) != set(
+                named_years(resolved.query)
+            ):
+                scope = None
+            classification = classification.model_copy(update={"year_scope": scope})
         target_names = classification.regions or classification.document_ids
         missing_targets = [
             target for target in target_names if target.casefold() not in resolved.query.casefold()
         ]
         resolved_query = resolved.query
+        # "How did Karnataka's literacy rate change from 2001 to 2011?" is one region in two
+        # years. It takes the comparison path, so the difference is computed in application code
+        # from two cited cells, each bound to its own year's column.
+        change_years = list(
+            dict.fromkeys(
+                [
+                    *named_years(state["user_query"]),
+                    *named_years(resolved.query),
+                ]
+            )
+        )
+        year_change = bool(
+            len(target_names) == 1
+            and state["task_type"] in {"lookup", "comparison"}
+            and (is_year_change(resolved.query) or is_year_change(state["user_query"]))
+        )
+        task_type = "comparison" if year_change else state["task_type"]
+        if year_change and state["task_type"] != "comparison":
+            classification = classification.model_copy(update={"task_type": "comparison"})
         target_guard_applied = bool(
-            state["task_type"] in {"comparison", "artifact_chart", "artifact_table"}
+            task_type in {"comparison", "artifact_chart", "artifact_table"}
             and target_names
             and missing_targets
         )
@@ -439,9 +526,16 @@ class AgentGraph:
         # target name specifically went missing, since extract_calculations needs the framing
         # every time it runs.
         comparison_framing_needed = bool(
-            state["task_type"] == "comparison" and target_names and not target_guard_applied
+            task_type == "comparison" and target_names and not target_guard_applied
         )
-        if target_guard_applied or comparison_framing_needed:
+        if year_change:
+            resolved_query = (
+                f"{resolved.query.rstrip()} Compute the change for {target_names[0]} in the same "
+                f"metric, population category, and units between "
+                f"{' and '.join(str(year) for year in change_years)}, taking each year's value "
+                "from that year's own column."
+            )
+        elif target_guard_applied or comparison_framing_needed:
             resolved_query = (
                 f"{resolved.query.rstrip()} Compare the same metric, year, population category, "
                 f"and units across these targets: {', '.join(target_names)}."
@@ -498,11 +592,14 @@ class AgentGraph:
                     query=resolved_query,
                     target_guard_applied=target_guard_applied,
                     comparison_framing_needed=comparison_framing_needed,
+                    year_change=year_change,
                     missing_targets=missing_targets,
                     latency_ms=(time.monotonic() - started) * 1000,
                 ),
             ],
         }
+        if classification != state["classification"] or task_type != state["task_type"]:
+            updates.update(task_type=task_type, classification=classification)
         if requires_clarification:
             classification = state["classification"].model_copy(
                 update={
@@ -714,6 +811,37 @@ class AgentGraph:
             }
         targets: list[tuple[list[str] | None, list[str] | None]] = []
         table_selection: ColumnSelection | None = None
+        year_cells: list[TableRecord] = []
+        year_scope = classification.year_scope
+        select_year_cells = getattr(self.tools, "select_year_cells", None)
+        if (
+            year_scope is not None
+            and select_year_cells is not None
+            and state["task_type"] in {"lookup", "comparison"}
+            and len(classification.regions) == 1
+            and year_scope.region.casefold() == classification.regions[0].casefold()
+            and set(year_scope.years) == set(named_years(query))
+        ):
+            result, record = await self._recorded_tool(
+                {**state, "tool_calls": calls},
+                "select_year_cells",
+                year_scope.model_dump(),
+                partial(select_year_cells, year_scope),
+            )
+            calls.append(record)
+            year_lookup = cast(YearLookup | None, result)
+            if year_lookup is not None:
+                year_cells = year_lookup.records
+                evidence.extend(year_lookup.evidence)
+            retrieval_events.append(
+                self._event(
+                    "year_cell_selection",
+                    "call_tools",
+                    selected=bool(year_cells),
+                    years=[cell.year for cell in year_cells],
+                    reason=year_lookup.reason if year_lookup else record.error_type,
+                )
+            )
         artifact_requirement = state.get("artifact_requirement")
         artifact_comparison = bool(
             state["task_type"] in {"artifact_chart", "artifact_table"}
@@ -730,7 +858,9 @@ class AgentGraph:
             targets.extend(([document], None) for document in classification.document_ids)
         else:
             targets.append((classification.document_ids or None, classification.regions or None))
-        if artifact_requirement is not None and artifact_requirement.rank_all:
+        if year_cells:
+            pass  # Exact cells and their current Qdrant chunks already satisfy retrieval.
+        elif artifact_requirement is not None and artifact_requirement.rank_all:
             documents_result, listing = await self._recorded_tool(
                 {**state, "tool_calls": calls},
                 "list_documents",
@@ -869,7 +999,11 @@ class AgentGraph:
             and artifact_requirement is not None
             and not artifact_requirement.rank_all
         )
-        if deduplicated and (state["task_type"] in {"lookup", "comparison"} or named_artifact):
+        if (
+            not year_cells
+            and deduplicated
+            and (state["task_type"] in {"lookup", "comparison"} or named_artifact)
+        ):
             expansion, record = await self._recorded_tool(
                 {**state, "tool_calls": calls},
                 "expand_candidate_pages",
@@ -909,10 +1043,22 @@ class AgentGraph:
                 max_characters=self.assessment_max_characters,
                 max_chunks=self.assessment_max_chunks,
             )
-            requests = await self.model.extract_calculations(query, calculation_evidence)
+            if len(year_cells) == 2:
+                requests = [
+                    CalculationRequest(
+                        description="Change between the requested Census years",
+                        operation="difference",
+                        values=[float(cell.value) for cell in year_cells],
+                        evidence_ids=list(
+                            dict.fromkeys(cell.chunk_id for cell in year_cells if cell.chunk_id)
+                        ),
+                    )
+                ]
+            else:
+                requests = await self.model.extract_calculations(query, calculation_evidence)
             calculation_event.append(
                 self._event(
-                    "model_invocation",
+                    "year_cell_calculation" if year_cells else "model_invocation",
                     "call_tools",
                     operation="calculation_extraction",
                     input_chunk_count=len(calculation_evidence),
@@ -969,6 +1115,7 @@ class AgentGraph:
         return {
             "retrieved_evidence": list(deduplicated.values()),
             "table_selection": table_selection,
+            "year_cells": year_cells,
             "tool_calls": calls,
             "available_limitations": available_limitations,
             "calculations": calculations,
@@ -1284,14 +1431,20 @@ class AgentGraph:
         # `_evidence_route` conditional edge (see `build`) always sends those task types to
         # `prepare_artifact` instead of this node when evidence is sufficient, and to
         # `graceful_response` otherwise. `synthesize` only ever runs for the remaining task types.
-        draft = await self.model.synthesize(
-            state["resolved_query"],
-            state["task_type"],
-            state.get("selected_evidence", []),
-            state.get("skill_instructions"),
-            state.get("limitations", []),
-            state.get("calculations", []),
-        )
+        selected_ids = {item.chunk_id for item in state.get("selected_evidence", [])}
+        year_cells = state.get("year_cells", [])
+        use_cells = bool(year_cells and all(cell.chunk_id in selected_ids for cell in year_cells))
+        if use_cells:
+            draft = year_cell_draft(year_cells)
+        else:
+            draft = await self.model.synthesize(
+                state["resolved_query"],
+                state["task_type"],
+                state.get("selected_evidence", []),
+                state.get("skill_instructions"),
+                state.get("limitations", []),
+                state.get("calculations", []),
+            )
         draft = enrich_source_claims(
             draft, state.get("selected_evidence", []), state["resolved_query"]
         )
@@ -1301,7 +1454,11 @@ class AgentGraph:
             "draft_answer": draft,
             "trace_events": [
                 *state.get("trace_events", []),
-                self._event("model_invocation", "synthesize", operation="structured_answer"),
+                self._event(
+                    "year_cell_answer" if use_cells else "model_invocation",
+                    "synthesize",
+                    operation="structured_answer",
+                ),
                 self._event(
                     "structured_draft",
                     "synthesize",
@@ -1994,6 +2151,17 @@ class AgentGraph:
         if draft.refusal and draft.claims:
             codes.append("ANSWER_REFUSAL_FLAG_CONFLICT")
         if answerable and state.get("evidence_sufficient") and not draft.refusal:
+            requested_years = set(named_years(state.get("resolved_query", ""))) | set(
+                named_years(state.get("user_query", ""))
+            )
+            if task in {"lookup", "comparison"} and requested_years:
+                source_years = {
+                    claim.year or CORPUS_DEFAULT_YEAR
+                    for claim in draft.claims
+                    if not claim.document_derived
+                }
+                if not requested_years <= source_years:
+                    codes.append("MISSING_REQUESTED_YEAR")
             if not draft.claims:
                 codes.extend(
                     ["EMPTY_CLAIMS_FOR_ANSWERABLE_TASK", "ANSWER_WITHOUT_STRUCTURED_CLAIM"]
@@ -2038,6 +2206,7 @@ class AgentGraph:
             draft,
             evidence,
             state.get("calculations", []),
+            await self._table_cells(evidence),
         )
         source_draft = draft.model_copy(
             update={"claims": [claim for claim in draft.claims if not claim.document_derived]}
@@ -2226,7 +2395,9 @@ class AgentGraph:
             )
             refusal = False
         elif task == "out_of_scope":
-            answer = "I’m limited to answering questions grounded in the supplied Census documents."
+            answer = state.get("scope_refusal") or (
+                "I’m limited to answering questions grounded in the supplied Census documents."
+            )
             refusal = True
         elif task in {"artifact_chart", "artifact_table"}:
             if not state.get("evidence_sufficient"):

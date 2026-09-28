@@ -4,12 +4,10 @@ from typing import Literal
 from pydantic import BaseModel
 
 from backend.app.agent.models import DraftClaim, EvidenceSpan
+from backend.app.agent.years import CORPUS_DEFAULT_YEAR
 from backend.app.retrieval.models import RetrievedEvidence
 
 CITATION_QUOTE_MAX_CHARS = 1600
-# Every document in this corpus is exclusively a Census 2011 report (see README/DESIGN.md); used
-# only as the implicit year for a sentence that states no year at all (see quote_rejection_reason).
-_CORPUS_DEFAULT_YEAR = 2011
 # "total" is deliberately excluded: it is this corpus's documented default residence scope (see
 # DESIGN.md's "Total persons" convention), so source prose routinely omits it for the baseline
 # case (e.g. "the number of literates" rather than "the total number of literates") while a
@@ -132,9 +130,19 @@ def _table_cell_supports(claim: DraftClaim, quote: str) -> bool:
 
 
 def quote_rejection_reason(
-    claim: DraftClaim, quote: str, evidence: RetrievedEvidence
+    claim: DraftClaim,
+    quote: str,
+    evidence: RetrievedEvidence,
+    *,
+    year_confirmed: bool = False,
 ) -> str | None:
-    """Return a stable reason code when an exact quote does not support structured facts."""
+    """Return a stable reason code when an exact quote does not support structured facts.
+
+    `year_confirmed` means the table store bound the claim's value to a cell in its claimed
+    year's column. It stands in for the quote naming the year, which a later table fragment
+    cannot do: the chunker repeats only the first header row, and literacy tables print their
+    years on the second. It relaxes nothing else.
+    """
     if not quote.strip():
         return "EMPTY_QUOTE"
     if quote not in evidence.text:
@@ -152,16 +160,21 @@ def quote_rejection_reason(
 
     expected_years = {claim.year} if claim.year is not None else _years(claim.text)
     quote_years = _years(quote)
-    # A sentence stating no year at all (quote_years empty) is treated as this corpus's
-    # sole/default report year: every document here is exclusively a Census 2011 report, so a
+    # A sentence stating no year at all (quote_years empty) is treated as the report's own year:
+    # every document here is a Census 2011 report (its tables also print 2001 columns), so a
     # figure's current-period sentence routinely omits the year even when an explicit comparison
     # year like 2001 appears elsewhere in the same passage (see DESIGN.md/hydration.py's
     # identical "2011 total persons" default for artifacts). This is narrower than it looks: it
     # only ever applies when the sentence names no year at all. A sentence naming any year still
     # must include the expected one — quote_years={2001} still correctly rejects an
     # expected_years={2011} claim, so a genuinely wrong-year sentence is never accepted here.
-    implicit_corpus_year = not quote_years and expected_years == {_CORPUS_DEFAULT_YEAR}
-    if expected_years and not expected_years <= quote_years and not implicit_corpus_year:
+    implicit_corpus_year = not quote_years and expected_years == {CORPUS_DEFAULT_YEAR}
+    if (
+        expected_years
+        and not expected_years <= quote_years
+        and not implicit_corpus_year
+        and not year_confirmed
+    ):
         return "YEAR_ABSENT"
 
     quote_tokens = _tokens(quote)
@@ -265,14 +278,17 @@ def _table_span(claim: DraftClaim, evidence: RetrievedEvidence) -> EvidenceSpan 
 
 
 def select_evidence_span_with_diagnostic(
-    claim: DraftClaim, evidence: RetrievedEvidence
+    claim: DraftClaim, evidence: RetrievedEvidence, *, year_confirmed: bool = False
 ) -> tuple[EvidenceSpan | None, QuoteSelectionDiagnostic]:
-    """Select an untouched exact span and return safe matching diagnostics."""
+    """Select an untouched exact span and return safe matching diagnostics.
+
+    `year_confirmed` applies to the table span only; a prose sentence must still name its year.
+    """
     rejection_codes: list[str] = []
     table = _table_span(claim, evidence)
     if table is not None:
         quote = evidence.text[table.start_offset : table.end_offset]
-        reason = quote_rejection_reason(claim, quote, evidence)
+        reason = quote_rejection_reason(claim, quote, evidence, year_confirmed=year_confirmed)
         if reason is None:
             return table, QuoteSelectionDiagnostic(
                 evidence_id=evidence.chunk_id,

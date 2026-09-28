@@ -30,6 +30,7 @@ from backend.app.execution.contracts import (
     SourceRecord,
 )
 from backend.app.retrieval.models import RetrievedEvidence
+from backend.app.tables.models import TableRecord
 from backend.app.tables.selection import ColumnSelection
 
 _PROVIDER_ERROR_MESSAGES = {
@@ -82,6 +83,7 @@ def hydrate_agent_state(raw: AgentState | dict[str, Any]) -> AgentState:
         "execution_result": ExecutionResult,
     }
     list_models: dict[str, type[BaseModel]] = {
+        "year_cells": TableRecord,
         "retrieved_evidence": RetrievedEvidence,
         "selected_evidence": RetrievedEvidence,
         "answer_claims": AnswerClaim,
